@@ -20,7 +20,6 @@ import (
 	"math"
 
 	"github.com/urfave/cli/v2"
-	"github.com/versity/versitygw/backend/meta"
 	"github.com/versity/versitygw/backend/posix"
 )
 
@@ -52,7 +51,7 @@ bucket: mybucket
 object: a/b/c/myobject
 will be translated into the file /mnt/fs/gwroot/mybucket/a/b/c/myobject`,
 		Action: runPosix,
-		Flags: []cli.Flag{
+		Flags: append([]cli.Flag{
 			&cli.BoolFlag{
 				Name:        "chuid",
 				Usage:       "chown newly created files and directories to client account UID",
@@ -85,24 +84,12 @@ will be translated into the file /mnt/fs/gwroot/mybucket/a/b/c/myobject`,
 				DefaultText: "0755",
 				Value:       0755,
 			},
-			&cli.StringFlag{
-				Name:        "sidecar",
-				Usage:       "use provided sidecar directory to store metadata",
-				EnvVars:     []string{"VGW_META_SIDECAR"},
-				Destination: &sidecar,
-			},
 			&cli.IntFlag{
 				Name:        "concurrency",
 				Usage:       "maximum concurrent actions allowed",
 				EnvVars:     []string{"VGW_POSIX_CONCURRENCY"},
 				Value:       5000,
 				Destination: &actionsConcurrency,
-			},
-			&cli.BoolFlag{
-				Name:        "nometa",
-				Usage:       "disable metadata storage",
-				EnvVars:     []string{"VGW_META_NONE"},
-				Destination: &nometa,
 			},
 			&cli.BoolFlag{
 				Name:        "disableotmp",
@@ -122,7 +109,7 @@ will be translated into the file /mnt/fs/gwroot/mybucket/a/b/c/myobject`,
 				EnvVars:     []string{"VGW_DEFAULT_ETAG"},
 				Destination: &defaultEtag,
 			},
-		},
+		}, metaStoreFlags()...),
 	}
 }
 
@@ -135,10 +122,6 @@ func runPosix(ctx *cli.Context) error {
 
 	if dirPerms > math.MaxUint32 {
 		return fmt.Errorf("invalid directory permissions: %d", dirPerms)
-	}
-
-	if nometa && sidecar != "" {
-		return fmt.Errorf("cannot use both nometa and sidecar metadata")
 	}
 
 	if actionsConcurrency <= 0 {
@@ -159,26 +142,13 @@ func runPosix(ctx *cli.Context) error {
 		DefaultEtag:          defaultEtag,
 	}
 
-	var ms meta.MetadataStorer
-	switch {
-	case sidecar != "":
-		sc, err := meta.NewSideCar(sidecar)
-		if err != nil {
-			return fmt.Errorf("failed to init sidecar metadata: %w", err)
-		}
-		ms = sc
-		opts.SideCarDir = sidecar
-	case nometa:
-		ms = meta.NoMeta{}
-	default:
-		ms = meta.XattrMeta{}
-		err := meta.XattrMeta{}.Test(gwroot)
-		if err != nil {
-			return fmt.Errorf("xattr check failed: %w", err)
-		}
+	ms, err := newMetaStore(gwroot)
+	if err != nil {
+		return err
 	}
+	opts.SideCarDir = ms.sidecarDir
 
-	be, err := posix.New(gwroot, ms, opts)
+	be, err := posix.New(gwroot, ms.storer, opts)
 	if err != nil {
 		return fmt.Errorf("failed to init posix backend: %w", err)
 	}

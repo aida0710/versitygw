@@ -67,6 +67,16 @@ ROOT_ACCESS_KEY="testuser" ROOT_SECRET_KEY="secret" ./versitygw --port :10000 --
 ```
 This will enable an S3 server on the current host listening on port 10000 and hosting the directory `/tmp/vgw` with older object versions in `/tmp/vers`. It's fine if both of these directories are within the same filesystem. The `--iam-dir` option enables simple JSON flat file accounts for testing.
 
+### Run the gateway with lustre backend:
+
+```
+mkdir /tmp/vgw /tmp/vgwmeta
+ROOT_ACCESS_KEY="testuser" ROOT_SECRET_KEY="secret" ./versitygw --port :10000 --iam-dir /tmp/vgw lustre --metadb /tmp/vgwmeta /tmp/vgw
+```
+The `lustre` backend targets parallel filesystems that cannot share blocks between files. The posix backend writes each multipart part to its own temporary file and copies those files into the finished object, which is free on filesystems with reflink support but writes every byte twice on Lustre. This backend writes each part straight into the region it will occupy in the finished object, so completing an upload is a truncate and a rename.
+
+`--metadb` keeps object and bucket attributes in per-bucket SQLite databases rather than in extended attributes, for filesystems where user xattrs are unavailable. It works with the `posix` backend too, and the directory may be on a different filesystem from the object data. Building with this metadata storer requires `CGO_ENABLED=1`.
+
 To get the usage output, run the following:
 
 ```

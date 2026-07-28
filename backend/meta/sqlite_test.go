@@ -416,6 +416,47 @@ func TestSQLitePathBucketIsolation(t *testing.T) {
 	}
 }
 
+// TestSQLiteBucketObjectSplitIsIrrelevant pins down the property the posix
+// backend depends on: it addresses the same attribute both as a bucket plus an
+// object path and as one joined path with an empty object, and both forms must
+// reach the same row. The sidecar storer gets this for free by joining the two
+// into a directory path.
+func TestSQLiteBucketObjectSplitIsIrrelevant(t *testing.T) {
+	s := newTestSQLite(t)
+
+	tests := []struct {
+		name             string
+		bucketA, objectA string
+		bucketB, objectB string
+	}{
+		{"object vs joined path", "b", "some/object", "b/some/object", ""},
+		{"one level", "b", "obj", "b/obj", ""},
+		{"upload dir vs upload id", "b", ".sgwtmp/multipart/hash/up1", "b/.sgwtmp/multipart/hash", "up1"},
+		{"version path", "/versions/b/key", "01JABC", "/versions/b/key/01JABC", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := s.StoreAttribute(nil, tt.bucketA, tt.objectA, "etag", []byte(tt.name)); err != nil {
+				t.Fatalf("StoreAttribute: %v", err)
+			}
+
+			got, err := s.RetrieveAttribute(nil, tt.bucketB, tt.objectB, "etag")
+			if err != nil {
+				t.Fatalf("RetrieveAttribute via the other form: %v", err)
+			}
+			if string(got) != tt.name {
+				t.Errorf("got %q, want %q", got, tt.name)
+			}
+
+			if err := s.DeleteAttribute(tt.bucketB, tt.objectB, "etag"); err != nil {
+				t.Fatalf("DeleteAttribute via the other form: %v", err)
+			}
+			assertNoSuchKey(t, s, tt.bucketA, tt.objectA, "etag")
+		})
+	}
+}
+
 func TestSQLiteConcurrentAccess(t *testing.T) {
 	s := newTestSQLite(t)
 

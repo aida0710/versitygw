@@ -118,6 +118,7 @@ func main() {
 	app.Commands = []*cli.Command{
 		posixCommand(),
 		scoutfsCommand(),
+		lustreCommand(),
 		s3Command(),
 		azureCommand(),
 		pluginCommand(),

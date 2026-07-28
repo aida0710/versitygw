@@ -137,14 +137,31 @@ func normalizeKey(p string) string {
 	return strings.TrimPrefix(p, "/")
 }
 
-// resolve maps a (bucket, object) pair onto the database that holds it and
-// the row key within that database.
+// resolve maps a (bucket, object) pair onto the database that holds it and the
+// row key within that database.
+//
+// The split between the two arguments carries no meaning of its own: the posix
+// backend addresses the same attribute as ("bucket", "some/object") in one
+// place and as ("bucket/some/object", "") in another, and both must land on the
+// same row. So the pair is joined first and the database is then taken from the
+// leading path element.
 func resolve(bucket, object string) (string, string) {
-	bucket, object = trimVolume(bucket), trimVolume(object)
-	if isSimpleName(bucket) {
-		return bucket, normalizeKey(object)
+	b := filepath.ToSlash(trimVolume(bucket))
+	full := normalizeKey(b + "/" + filepath.ToSlash(trimVolume(object)))
+
+	// An absolute container path is never a bucket. The object versioning
+	// directory arrives this way, and its leading element is a filesystem
+	// path component that must not claim a bucket database.
+	if strings.HasPrefix(b, "/") {
+		return sharedDB, full
 	}
-	return sharedDB, normalizeKey(filepath.ToSlash(bucket) + "/" + filepath.ToSlash(object))
+
+	first, rest, _ := strings.Cut(full, "/")
+	if !isSimpleName(first) {
+		return sharedDB, full
+	}
+
+	return first, rest
 }
 
 func (s *SQLiteMeta) dbPath(name string) string {
