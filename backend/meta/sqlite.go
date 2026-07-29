@@ -27,21 +27,21 @@ import (
 	"strings"
 	"sync"
 
-	// sqlite3 driver, requires cgo
+	// sqlite3 ドライバ。cgo が必要
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/versity/versitygw/s3err"
 )
 
-// SQLiteMeta is a MetadataStorer that keeps all object and bucket attributes
-// in per-bucket SQLite databases held in a dedicated directory, typically on
-// a filesystem separate from the object data.
+// SQLiteMeta はオブジェクトとバケットの全属性を、専用ディレクトリ配下の
+// バケット単位 SQLite データベースに保持する MetadataStorer である。この
+// ディレクトリは通常オブジェクトデータとは別のファイルシステムに置く。
 //
-// It exists for filesystems that cannot store user extended attributes, and
-// where the file-per-attribute layout of SideCar generates too many inode and
-// directory entry operations. A parallel filesystem such as Lustre serves
-// every one of those lookups from its metadata servers, so collapsing the
-// attributes of a whole bucket into a single database file replaces a large
-// number of namespace operations with a handful of reads against one file.
+// user 拡張属性を保存できないファイルシステム、および SideCar の属性ごとに
+// ファイルを作るレイアウトでは inode とディレクトリエントリの操作が多すぎる
+// 環境のために存在する。Lustre のような並列ファイルシステムではそれらの
+// 参照がすべてメタデータサーバへの問い合わせになるため、バケット全体の属性を
+// 1 つのデータベースファイルにまとめることで、大量の名前空間操作を 1 ファイル
+// への数回の読み取りに置き換えられる。
 type SQLiteMeta struct {
 	dir string
 
@@ -50,17 +50,16 @@ type SQLiteMeta struct {
 }
 
 const (
-	// sharedDB holds attributes for callers that address a container by
-	// path rather than by plain bucket name, such as the object versioning
-	// directory. Buckets can never collide with this name because S3
-	// bucket names may not begin with a dot.
+	// sharedDB は、オブジェクトバージョニングのディレクトリのように、単純な
+	// バケット名ではなくパスでコンテナを指す呼び出し元の属性を保持する。S3 の
+	// バケット名はドットで始められないので、バケットと名前が衝突することはない。
 	sharedDB = ".shared"
 
 	dbSuffix = ".db"
 
-	// maxReaders bounds the connection pool of a single bucket database.
-	// SQLite in WAL mode serves concurrent readers alongside one writer,
-	// and writers that collide wait out the busy timeout below.
+	// maxReaders は 1 つのバケットデータベースのコネクションプール上限である。
+	// WAL モードの SQLite は 1 つのライタと並行して複数のリーダを処理でき、
+	// 競合したライタは下の busy timeout の間待機する。
 	maxReadersPerCPU = 4
 
 	busyTimeoutMS = 10000
@@ -74,10 +73,10 @@ CREATE TABLE IF NOT EXISTS attributes (
 	PRIMARY KEY (okey, attr)
 ) WITHOUT ROWID;`
 
-// NewSQLite creates a SQLiteMeta storing its databases in dir. The directory
-// must already exist. The path is resolved to an absolute one because the
-// posix backend changes the process working directory to the gateway root
-// after the metadata storer has been constructed.
+// NewSQLite は dir 配下にデータベースを置く SQLiteMeta を生成する。ディレクトリ
+// は事前に存在している必要がある。パスを絶対パスに解決するのは、メタデータ
+// ストアの生成後に posix バックエンドがプロセスのカレントディレクトリを
+// ゲートウェイルートへ変更するためである。
 func NewSQLite(dir string) (*SQLiteMeta, error) {
 	absdir, err := filepath.Abs(dir)
 	if err != nil {
@@ -98,8 +97,7 @@ func NewSQLite(dir string) (*SQLiteMeta, error) {
 	}, nil
 }
 
-// Close releases every open database handle. It is safe to call more than
-// once.
+// Close は開いている全データベースハンドルを解放する。複数回呼んでも安全。
 func (s *SQLiteMeta) Close() error {
 	s.mu.Lock()
 	dbs := s.dbs
@@ -115,10 +113,10 @@ func (s *SQLiteMeta) Close() error {
 	return errors.Join(errs...)
 }
 
-// isSimpleName reports whether name can be used directly as a database file
-// name. Callers sometimes pass a multi-segment path where a bucket name is
-// expected, most notably the object versioning directory, and those are
-// folded into the shared database instead.
+// isSimpleName は name をそのままデータベースファイル名として使えるかを返す。
+// バケット名が来るはずの位置に複数階層のパスが渡されることがあり（代表例が
+// オブジェクトバージョニングのディレクトリ）、それらは共有データベースへ
+// まとめる。
 func isSimpleName(name string) bool {
 	if name == "" || name == "." || name == ".." {
 		return false
@@ -129,29 +127,27 @@ func isSimpleName(name string) bool {
 	return !strings.ContainsAny(name, `/\`)
 }
 
-// normalizeKey turns a path into the canonical slash separated form used for
-// the okey column.
+// normalizeKey はパスを okey 列で使うスラッシュ区切りの正規形へ変換する。
 func normalizeKey(p string) string {
 	p = filepath.ToSlash(p)
 	p = path.Clean("/" + p)
 	return strings.TrimPrefix(p, "/")
 }
 
-// resolve maps a (bucket, object) pair onto the database that holds it and the
-// row key within that database.
+// resolve は (bucket, object) の組を、それを保持するデータベースとその中の
+// 行キーへ対応付ける。
 //
-// The split between the two arguments carries no meaning of its own: the posix
-// backend addresses the same attribute as ("bucket", "some/object") in one
-// place and as ("bucket/some/object", "") in another, and both must land on the
-// same row. So the pair is joined first and the database is then taken from the
-// leading path element.
+// 2 つの引数の区切り位置そのものには意味が無い。posix バックエンドは同一の属性を
+// ある箇所では ("bucket", "some/object")、別の箇所では ("bucket/some/object", "")
+// として参照するが、いずれも同じ行に到達しなければならない。そこで先に両者を
+// 連結し、その先頭のパス要素からデータベースを決める。
 func resolve(bucket, object string) (string, string) {
 	b := filepath.ToSlash(trimVolume(bucket))
 	full := normalizeKey(b + "/" + filepath.ToSlash(trimVolume(object)))
 
-	// An absolute container path is never a bucket. The object versioning
-	// directory arrives this way, and its leading element is a filesystem
-	// path component that must not claim a bucket database.
+	// 絶対パスのコンテナはバケットではない。オブジェクトバージョニングの
+	// ディレクトリがこの形で渡ってくるが、その先頭要素はファイルシステム上の
+	// パス要素であり、バケット用データベースを占有させてはならない。
 	if strings.HasPrefix(b, "/") {
 		return sharedDB, full
 	}
@@ -168,9 +164,9 @@ func (s *SQLiteMeta) dbPath(name string) string {
 	return filepath.Join(s.dir, name+dbSuffix)
 }
 
-// getDB returns the handle for the named database. When create is false and
-// the database file does not exist yet, it returns a nil handle rather than
-// bringing an empty database into existence for what is only a read.
+// getDB は指定名のデータベースのハンドルを返す。create が false でデータベース
+// ファイルがまだ存在しない場合は、読み取りのためだけに空のデータベースを作る
+// ことはせず nil ハンドルを返す。
 func (s *SQLiteMeta) getDB(name string, create bool) (*sql.DB, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -211,8 +207,7 @@ func (s *SQLiteMeta) getDB(name string, create bool) (*sql.DB, error) {
 	return db, nil
 }
 
-// dropDB closes and removes the named database along with its write ahead
-// log sidecars.
+// dropDB は指定名のデータベースを、その WAL 関連ファイルも含めて閉じて削除する。
 func (s *SQLiteMeta) dropDB(name string) error {
 	s.mu.Lock()
 	db, ok := s.dbs[name]
@@ -235,21 +230,21 @@ func (s *SQLiteMeta) dropDB(name string) error {
 	return nil
 }
 
-// likeEscape quotes the LIKE wildcards in a literal prefix so that attribute
-// paths containing them are not treated as patterns.
+// likeEscape はリテラルの前方一致文字列に含まれる LIKE のワイルドカードを
+// エスケープし、そうした文字を含む属性パスがパターンとして扱われないようにする。
 func likeEscape(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 	return r.Replace(s)
 }
 
-// wrapDBErr converts the disk full condition into the S3 error the gateway
-// reports for it, and leaves everything else untouched.
+// wrapDBErr はディスク満杯をゲートウェイが返すべき S3 エラーへ変換する。
+// それ以外のエラーはそのまま通す。
 func wrapDBErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	// The sqlite3 driver reports a full filesystem as a generic disk I/O
-	// error, so match on the message rather than an errno.
+	// sqlite3 ドライバはファイルシステム満杯を汎用のディスク I/O エラーとして
+	// 報告するので、errno ではなくメッセージで判定する。
 	if strings.Contains(err.Error(), "disk is full") ||
 		strings.Contains(err.Error(), "database or disk is full") {
 		return s3err.GetAPIError(s3err.ErrNoSpaceLeftOnDevice)
@@ -257,8 +252,7 @@ func wrapDBErr(err error) error {
 	return err
 }
 
-// RetrieveAttribute retrieves the value of a specific attribute for an object
-// or a bucket.
+// RetrieveAttribute はオブジェクトまたはバケットの指定属性の値を取得する。
 func (s *SQLiteMeta) RetrieveAttribute(_ *os.File, bucket, object, attribute string) ([]byte, error) {
 	dbname, okey := resolve(bucket, object)
 
@@ -281,16 +275,16 @@ func (s *SQLiteMeta) RetrieveAttribute(_ *os.File, bucket, object, attribute str
 		return nil, fmt.Errorf("read attribute: %w", err)
 	}
 	if value == nil {
-		// database/sql yields a nil slice for a zero length blob, while
-		// callers distinguish a stored empty value from a missing one.
+		// database/sql は長さ 0 の blob に対して nil スライスを返すが、呼び出し
+		// 元は「空の値が保存されている」と「値が無い」を区別する。
 		value = []byte{}
 	}
 
 	return value, nil
 }
 
-// StoreAttribute stores the value of a specific attribute for an object or a
-// bucket, replacing any previous value.
+// StoreAttribute はオブジェクトまたはバケットの指定属性の値を保存する。既存の
+// 値があれば置き換える。
 func (s *SQLiteMeta) StoreAttribute(_ *os.File, bucket, object, attribute string, value []byte) error {
 	dbname, okey := resolve(bucket, object)
 
@@ -314,8 +308,7 @@ func (s *SQLiteMeta) StoreAttribute(_ *os.File, bucket, object, attribute string
 	return nil
 }
 
-// DeleteAttribute removes the value of a specific attribute for an object or
-// a bucket.
+// DeleteAttribute はオブジェクトまたはバケットの指定属性を削除する。
 func (s *SQLiteMeta) DeleteAttribute(bucket, object, attribute string) error {
 	dbname, okey := resolve(bucket, object)
 
@@ -344,8 +337,8 @@ func (s *SQLiteMeta) DeleteAttribute(bucket, object, attribute string) error {
 	return nil
 }
 
-// ListAttributes lists all attributes for an object or a bucket. Attributes
-// of nested keys are not included.
+// ListAttributes はオブジェクトまたはバケットの全属性を列挙する。配下のキーの
+// 属性は含まない。
 func (s *SQLiteMeta) ListAttributes(bucket, object string) ([]string, error) {
 	dbname, okey := resolve(bucket, object)
 
@@ -378,14 +371,14 @@ func (s *SQLiteMeta) ListAttributes(bucket, object string) ([]string, error) {
 	return attrs, nil
 }
 
-// DeleteAttributes removes all attributes for an object or a bucket, along
-// with those of any keys nested below it. Nested keys matter because the
-// posix backend stores multipart part attributes underneath the upload
-// directory and drops the whole subtree at once.
+// DeleteAttributes はオブジェクトまたはバケットの全属性を、配下のキーのものも
+// 含めて削除する。配下も対象にするのは、posix バックエンドがマルチパートの part
+// 属性をアップロードディレクトリの下に置き、サブツリーごとまとめて削除するため
+// である。
 //
-// When object is empty and bucket names a real bucket, the entire database is
-// removed so that no orphaned object or multipart metadata survives
-// DeleteBucket.
+// object が空でかつ bucket が実在のバケットを指す場合はデータベース全体を削除
+// する。DeleteBucket 後に孤立したオブジェクトやマルチパートのメタデータが残ら
+// ないようにするため。
 func (s *SQLiteMeta) DeleteAttributes(bucket, object string) error {
 	dbname, okey := resolve(bucket, object)
 
@@ -411,8 +404,8 @@ func (s *SQLiteMeta) DeleteAttributes(bucket, object string) error {
 	return nil
 }
 
-// RenameObject moves all attributes stored under oldObject, including those
-// of nested keys, to newObject.
+// RenameObject は oldObject 配下に保存された全属性を、配下のキーのものも含めて
+// newObject へ移す。
 func (s *SQLiteMeta) RenameObject(bucket, oldObject, newObject string) error {
 	dbname, oldKey := resolve(bucket, oldObject)
 	_, newKey := resolve(bucket, newObject)
@@ -426,7 +419,7 @@ func (s *SQLiteMeta) RenameObject(bucket, oldObject, newObject string) error {
 		return err
 	}
 	if db == nil {
-		// No metadata stored yet, nothing to rename.
+		// メタデータがまだ無いので、リネームするものは無い。
 		return nil
 	}
 
@@ -436,8 +429,8 @@ func (s *SQLiteMeta) RenameObject(bucket, oldObject, newObject string) error {
 	}
 	defer tx.Rollback()
 
-	// Clear the destination first so that a partially populated target does
-	// not collide with the rows being moved onto it.
+	// 先に移動先を空にする。中途半端に埋まった移動先が、移してくる行と衝突
+	// しないようにするため。
 	_, err = tx.Exec(
 		`DELETE FROM attributes WHERE okey = ? OR okey LIKE ? ESCAPE '\'`,
 		newKey, likeEscape(newKey)+`/%`)
@@ -451,8 +444,8 @@ func (s *SQLiteMeta) RenameObject(bucket, oldObject, newObject string) error {
 		return wrapDBErr(fmt.Errorf("rename metadata: %w", err))
 	}
 
-	// length() and substr() both count characters, so deriving the offset
-	// from length() keeps multi-byte keys correct.
+	// length() と substr() はいずれも文字数で数えるため、オフセットを length()
+	// から導けばマルチバイトのキーでも正しく動く。
 	_, err = tx.Exec(
 		`UPDATE attributes SET okey = ? || substr(okey, length(?) + 1) WHERE okey LIKE ? ESCAPE '\'`,
 		newKey, oldKey, likeEscape(oldKey)+`/%`)

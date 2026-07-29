@@ -29,9 +29,9 @@ import (
 	"github.com/versity/versitygw/s3response"
 )
 
-// The helpers here mirror their unexported counterparts in backend/posix.
-// They read and write the same attribute payloads, so the two backends stay
-// interchangeable over one gateway root.
+// ここのヘルパーは backend/posix にある非公開の対応物を写したものである。
+// 読み書きする属性のペイロードが同一なので、1 つのゲートウェイルート上で両者を
+// 入れ替えても動作する。
 
 func (l *Lustre) storeChecksums(f *os.File, bucket, object string, chs s3response.Checksum) error {
 	checksums, err := json.Marshal(chs)
@@ -52,7 +52,7 @@ func (l *Lustre) retrieveChecksums(f *os.File, bucket, object string) (checksums
 	return checksums, err
 }
 
-// hashConfig pairs a request header checksum value with its algorithm.
+// hashConfig はリクエストヘッダのチェックサム値とそのアルゴリズムの対である。
 type hashConfig struct {
 	value    *string
 	hashType utils.HashType

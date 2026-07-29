@@ -23,17 +23,16 @@ import (
 	"strconv"
 )
 
-// The multipart layout deliberately mirrors the posix backend so that the
-// two can share a gateway root, with one difference: part payloads are not
-// stored as one file per part. They are written straight into a single
-// sparse staging file at the offset the part will occupy in the finished
-// object, which is what removes the second write of every byte.
+// マルチパートのレイアウトは posix バックエンドに意図的に揃えてあり、1 つの
+// ゲートウェイルートを両者で共有できる。違いは part のペイロードを part ごとの
+// ファイルに置かない点で、最終オブジェクト内で占めることになるオフセットへ
+// 直接書き込む。これが全バイトの 2 回目の書き込みを無くしている。
 //
-//	<bucket>/.sgwtmp/multipart/<sha256hex(key)>/           carries attr "objname"
+//	<bucket>/.sgwtmp/multipart/<sha256hex(key)>/           属性 "objname" を持つ
 //	<bucket>/.sgwtmp/multipart/<sha256hex(key)>/<uploadID>/
-//	    data          the staging file, sparse, holds every part payload
-//	    slotsize      the configured part size the upload was created under
-//	    <N>           empty sparse marker sized to part N, for enumeration
+//	    data          ステージングファイル。スパースで全 part のペイロードを保持
+//	    slotsize      このアップロードが作成された時点の part サイズ
+//	    <N>           part N のサイズを持つ空のスパースなマーカー。列挙用
 const (
 	metaTmpDir          = ".sgwtmp"
 	metaTmpMultipartDir = metaTmpDir + "/multipart"
@@ -44,8 +43,8 @@ const (
 	slotSizeName = "slotsize"
 )
 
-// Attribute keys, mirrored from backend/posix where they are unexported. The
-// values are part of the on-disk format, so they must not drift.
+// 属性キー。backend/posix では非公開なのでここに写している。値はオンディスク
+// フォーマットの一部なので、posix 側とズレさせてはいけない。
 const (
 	etagkey            = "etag"
 	checksumsKey       = "checksums"
@@ -64,39 +63,38 @@ const (
 	objectLegalHoldKey = "object-legal-hold"
 )
 
-// objHash is the directory name that groups every in-flight upload for one
-// object key.
+// objHash は 1 つのオブジェクトキーに対する進行中の全アップロードをまとめる
+// ディレクトリ名を返す。
 func objHash(object string) string {
 	sum := sha256.Sum256([]byte(object))
 	return fmt.Sprintf("%x", sum)
 }
 
-// objdir is the bucket relative directory holding all uploads for a key.
+// objdir はあるキーの全アップロードを収めるバケット相対ディレクトリを返す。
 func objdir(object string) string {
 	return filepath.Join(metaTmpMultipartDir, objHash(object))
 }
 
-// uploadDir is the bucket relative directory of a single upload.
+// uploadDir は 1 つのアップロードのバケット相対ディレクトリを返す。
 func uploadDir(object, uploadID string) string {
 	return filepath.Join(objdir(object), uploadID)
 }
 
-// partMarker is the bucket relative path of the sparse marker for a part.
-// The marker exists so that parts can be enumerated and sized with a readdir
-// and a stat, exactly as the posix backend does, while the payload itself
-// lives in the staging file.
+// partMarker は part に対応するスパースなマーカーのバケット相対パスを返す。
+// ペイロード自体はステージングファイル側にあるが、マーカーがあることで part の
+// 列挙とサイズ取得を posix バックエンドと同じく readdir と stat のままにできる。
 func partMarker(updir string, part int32) string {
 	return filepath.Join(updir, strconv.Itoa(int(part)))
 }
 
-// stagingPath is the bucket relative path of the single file every part is
-// written into.
+// stagingPath は全 part の書き込み先となる 1 本のファイルのバケット相対パスを
+// 返す。
 func stagingPath(updir string) string {
 	return filepath.Join(updir, stagingName)
 }
 
-// readSlotSize returns the part size an upload was created under, or 0 when
-// the record is missing.
+// readSlotSize はアップロードが作成された時点の part サイズを返す。記録が無い
+// 場合は 0 を返す。
 func readSlotSize(dir string) (int64, error) {
 	b, err := os.ReadFile(filepath.Join(dir, slotSizeName))
 	if errors.Is(err, os.ErrNotExist) {
@@ -114,9 +112,9 @@ func readSlotSize(dir string) (int64, error) {
 	return n, nil
 }
 
-// writeSlotSize records the part size an upload is created under. Parts are
-// placed by that size, so a gateway restarted with a different one must not
-// silently keep filling an upload that was laid out for the old value.
+// writeSlotSize はアップロード作成時の part サイズを記録する。part の配置は
+// このサイズで決まるため、別の値で再起動したゲートウェイが古い値でレイアウト
+// されたアップロードに黙って書き足すことがあってはならない。
 func writeSlotSize(dir string, size int64) error {
 	name := filepath.Join(dir, slotSizeName)
 
@@ -135,7 +133,7 @@ func writeSlotSize(dir string, size int64) error {
 	return nil
 }
 
-// slotOffset is where part n is written.
+// slotOffset は part n の書き込み位置を返す。
 func slotOffset(slot int64, part int32) int64 {
 	return int64(part-1) * slot
 }

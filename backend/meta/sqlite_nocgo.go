@@ -18,17 +18,17 @@ package meta
 
 import "errors"
 
-// SQLiteMeta is a placeholder for builds without cgo. The SQLite metadata
-// storer links against the sqlite3 C library, so it is only available when
-// the gateway is built with CGO_ENABLED=1.
+// SQLiteMeta は cgo 無しビルド向けのプレースホルダである。SQLite メタデータ
+// ストアは sqlite3 の C ライブラリとリンクするため、CGO_ENABLED=1 でビルドした
+// 場合にのみ利用できる。
 type SQLiteMeta struct {
 	NoMeta
 }
 
-// Close is a no-op for the placeholder.
+// Close はプレースホルダなので何もしない。
 func (*SQLiteMeta) Close() error { return nil }
 
-// NewSQLite always fails on builds without cgo.
+// NewSQLite は cgo 無しビルドでは常に失敗する。
 func NewSQLite(_ string) (*SQLiteMeta, error) {
 	return nil, errors.New("sqlite metadata requires a build with cgo enabled (CGO_ENABLED=1)")
 }

@@ -40,9 +40,9 @@ import (
 
 const testBucket = "testbucket"
 
-// newTestBackend builds a Lustre backend over a temporary gateway root with
-// sqlite metadata. The posix constructor changes the process working
-// directory, so these tests cannot run in parallel with each other.
+// newTestBackend は一時的なゲートウェイルート上に sqlite メタデータ付きの
+// Lustre バックエンドを構築する。posix のコンストラクタがプロセスのカレント
+// ディレクトリを変更するため、これらのテストは互いに並行実行できない。
 func newTestBackend(t *testing.T, opts Opts) *Lustre {
 	t.Helper()
 
@@ -88,7 +88,7 @@ func newTestBackend(t *testing.T, opts Opts) *Lustre {
 
 func randBytes(n int) []byte {
 	b := make([]byte, n)
-	// Deterministic content keeps a failure reproducible.
+	// 内容を決定的にしておき、失敗を再現できるようにする。
 	r := rand.New(rand.NewSource(int64(n)))
 	r.Read(b)
 	return b
@@ -108,9 +108,9 @@ func inode(t *testing.T, path string) uint64 {
 	return st.Ino
 }
 
-// uploadParts pushes the payloads named by order as parts, and returns the
-// completed part list covering every payload. Parts left out of order are
-// assumed to be on the server already, which is what the re-upload test needs.
+// uploadParts は order で指定されたペイロードを part として送信し、全ペイロード
+// 分の完了 part リストを返す。order に含まれない part は既にサーバ上にあるものと
+// みなす。これは再アップロードのテストで必要になる。
 func uploadParts(t *testing.T, be *Lustre, key, uploadID string, payloads [][]byte, order []int) []types.CompletedPart {
 	t.Helper()
 
@@ -175,8 +175,8 @@ func readObject(t *testing.T, be *Lustre, key string) []byte {
 	return b
 }
 
-// runMultipart drives a whole upload and returns the object contents along
-// with the inode the staging file had before completion.
+// runMultipart はアップロード一式を実行し、オブジェクトの内容と、完了前の
+// ステージングファイルの inode を返す。
 func runMultipart(t *testing.T, be *Lustre, key string, payloads [][]byte, order []int) (data []byte, stagingIno uint64, etag string) {
 	t.Helper()
 
@@ -216,8 +216,8 @@ func runMultipart(t *testing.T, be *Lustre, key string, payloads [][]byte, order
 	return readObject(t, be, key), stagingIno, wantEtag
 }
 
-// assertAPIError checks that err is the S3 error the client should see, rather
-// than an internal failure that would surface as a 500.
+// assertAPIError は err がクライアントに見せるべき S3 エラーであることを確認
+// する。500 として表面化する内部エラーになっていないことの検査でもある。
 func assertAPIError(t *testing.T, err error, code string, status int) {
 	t.Helper()
 
@@ -241,7 +241,7 @@ func assertUploadCleanedUp(t *testing.T, key string) {
 		t.Errorf("upload directory %q survived completion: %v", dir, err)
 	}
 
-	// Nothing may be left over in the bucket scratch directory either.
+	// バケットの作業用ディレクトリにも何も残っていてはならない。
 	ents, err := os.ReadDir(filepath.Join(testBucket, metaTmpDir))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("read scratch dir: %v", err)
@@ -253,9 +253,10 @@ func assertUploadCleanedUp(t *testing.T, key string) {
 	}
 }
 
-// TestMultipartUniformIsZeroCopy is the case every real uploader produces:
-// equally sized parts with a shorter last one. The finished object must be the
-// staging file itself, so its inode is unchanged and no byte was copied.
+// TestMultipartUniformIsZeroCopy は実際のアップローダが必ず生成する形、すなわち
+// 同一サイズの part 列と短い最終 part を検証する。完成したオブジェクトは
+// ステージングファイルそのものであるべきで、inode が変わらないことが 1 バイトも
+// コピーされていない証拠になる。
 func TestMultipartUniformIsZeroCopy(t *testing.T) {
 	be := newTestBackend(t, Opts{})
 
@@ -280,8 +281,8 @@ func TestMultipartUniformIsZeroCopy(t *testing.T) {
 	assertUploadCleanedUp(t, key)
 }
 
-// TestMultipartOutOfOrderIsZeroCopy checks that parts arriving in any order
-// still land in their slots, since uploaders send them concurrently.
+// TestMultipartOutOfOrderIsZeroCopy は part がどの順序で到着してもスロットに
+// 収まることを確認する。アップローダは part を並行送信するため。
 func TestMultipartOutOfOrderIsZeroCopy(t *testing.T) {
 	be := newTestBackend(t, Opts{})
 
@@ -303,10 +304,9 @@ func TestMultipartOutOfOrderIsZeroCopy(t *testing.T) {
 	}
 }
 
-// TestMultipartRaggedRejected covers a non-final part that is shorter than the
-// configured size. Its successors are already sitting at their slot offsets, so
-// the object cannot be assembled without a copy and the request is refused
-// rather than silently taking the slow path.
+// TestMultipartRaggedRejected は最終 part 以外が設定サイズより短い場合を検証
+// する。後続の part は既にスロット位置に置かれているためコピー無しには組み立て
+// られず、黙って低速な経路へ退避させずに要求を拒否する。
 func TestMultipartRaggedRejected(t *testing.T) {
 	be := newTestBackend(t, Opts{PartSize: 2 * backend.MinPartSize})
 
@@ -322,8 +322,8 @@ func TestMultipartRaggedRejected(t *testing.T) {
 		t.Fatalf("CreateMultipartUpload: %v", err)
 	}
 
-	// Part 1 is a legal S3 part size but not the configured one, which
-	// leaves every later part sitting past where it belongs.
+	// part 1 は S3 的には正当なサイズだが設定値とは異なるため、以降の part が
+	// すべて本来あるべき位置より後ろに置かれることになる。
 	payloads := [][]byte{
 		randBytes(backend.MinPartSize),
 		randBytes(2 * backend.MinPartSize),
@@ -343,9 +343,9 @@ func TestMultipartRaggedRejected(t *testing.T) {
 	assertAPIError(t, err, "InvalidRequest", 400)
 }
 
-// TestMultipartGapRejected covers completing with a subset that leaves a hole
-// in the part numbers. Plain S3 allows it, but the surviving parts would then
-// need to move.
+// TestMultipartGapRejected は part 番号に歯抜けが生じる部分集合での complete を
+// 検証する。本来の S3 では許容されるが、この方式では残った part を移動させる
+// 必要が生じてしまう。
 func TestMultipartGapRejected(t *testing.T) {
 	be := newTestBackend(t, Opts{})
 
@@ -368,7 +368,7 @@ func TestMultipartGapRejected(t *testing.T) {
 	}
 	all := uploadParts(t, be, key, mpu.UploadId, payloads, []int{0, 1, 2})
 
-	// Complete with parts 2 and 3 only.
+	// part 2 と 3 だけで complete する。
 	_, _, err = be.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket:          &bucket,
 		Key:             &key,
@@ -381,8 +381,8 @@ func TestMultipartGapRejected(t *testing.T) {
 	assertAPIError(t, err, "InvalidRequest", 400)
 }
 
-// TestOversizedPartRejected checks that a part larger than the configured size
-// is refused at upload time, before it can run into its neighbour's region.
+// TestOversizedPartRejected は設定サイズより大きい part が、隣の領域を侵す前に
+// アップロード時点で拒否されることを確認する。
 func TestOversizedPartRejected(t *testing.T) {
 	be := newTestBackend(t, Opts{PartSize: backend.MinPartSize})
 
@@ -415,16 +415,16 @@ func TestOversizedPartRejected(t *testing.T) {
 	}
 	assertAPIError(t, err, "EntityTooLarge", 400)
 
-	// The rejected part must leave nothing behind.
+	// 拒否された part は何も残してはならない。
 	updir := filepath.Join(bucket, uploadDir(key, mpu.UploadId))
 	if _, err := os.Stat(partMarker(updir, part)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("rejected part left a marker behind: %v", err)
 	}
 }
 
-// TestPartSizeChangedUnderUpload covers a gateway restarted with a different
-// part size while an upload is in flight. The parts already written are laid
-// out for the old size, so the upload must not be continued.
+// TestPartSizeChangedUnderUpload はアップロード進行中に別の part サイズで
+// ゲートウェイが再起動された場合を検証する。書き込み済みの part は古いサイズで
+// レイアウトされているため、そのアップロードを継続してはならない。
 func TestPartSizeChangedUnderUpload(t *testing.T) {
 	be := newTestBackend(t, Opts{PartSize: backend.MinPartSize})
 
@@ -440,7 +440,7 @@ func TestPartSizeChangedUnderUpload(t *testing.T) {
 		t.Fatalf("CreateMultipartUpload: %v", err)
 	}
 
-	// Stand in for a restart under a different --mpu-part-size.
+	// 別の --mpu-part-size での再起動を模したもの。
 	be.partSize = backend.MinPartSize * 2
 
 	body := randBytes(1024)
@@ -461,8 +461,8 @@ func TestPartSizeChangedUnderUpload(t *testing.T) {
 	assertAPIError(t, err, "InvalidRequest", 400)
 }
 
-// TestMultipartShortPartFirst confirms the configured size holds regardless of
-// arrival order, including when the short final part lands first.
+// TestMultipartShortPartFirst は到着順に関わらず設定サイズが維持されることを
+// 確認する。短い最終 part が最初に到着する場合も含む。
 func TestMultipartShortPartFirst(t *testing.T) {
 	be := newTestBackend(t, Opts{PartSize: backend.MinPartSize})
 
@@ -473,7 +473,7 @@ func TestMultipartShortPartFirst(t *testing.T) {
 		randBytes(512),
 	}
 
-	// The last, short part arrives first.
+	// 短い最終 part が最初に到着する。
 	data, stagingIno, _ := runMultipart(t, be, key, payloads, []int{2, 1, 0})
 
 	if !bytes.Equal(data, bytes.Join(payloads, nil)) {
@@ -484,8 +484,49 @@ func TestMultipartShortPartFirst(t *testing.T) {
 	}
 }
 
-// TestMultipartSinglePart covers uploads small enough to be one part, where
-// the minimum part size does not apply.
+// TestPutObjectIgnoresPartSize は固定 part サイズの制約がマルチパートアップ
+// ロードにのみ及ぶことを固定する。単発 PUT には配置すべき part が無いので、
+// S3 API が受け付けるサイズはすべてそのまま通らなければならない。
+func TestPutObjectIgnoresPartSize(t *testing.T) {
+	be := newTestBackend(t, Opts{PartSize: backend.MinPartSize})
+
+	ctx := context.Background()
+	bucket := testBucket
+
+	for _, size := range []int{
+		0,
+		1,
+		1234,
+		backend.MinPartSize - 1,
+		backend.MinPartSize + 1,
+		3 * backend.MinPartSize,
+	} {
+		key := fmt.Sprintf("put/%d", size)
+		body := randBytes(size)
+		length := int64(size)
+
+		res, err := be.PutObject(ctx, s3response.PutObjectInput{
+			Bucket:        &bucket,
+			Key:           &key,
+			ContentLength: &length,
+			Body:          bytes.NewReader(body),
+		})
+		if err != nil {
+			t.Fatalf("PutObject of %d bytes: %v", size, err)
+		}
+
+		want := fmt.Sprintf("\"%x\"", md5.Sum(body))
+		if res.ETag != want {
+			t.Errorf("%d bytes: etag = %s, want %s", size, res.ETag, want)
+		}
+		if got := readObject(t, be, key); !bytes.Equal(got, body) {
+			t.Errorf("%d bytes: contents differ", size)
+		}
+	}
+}
+
+// TestMultipartSinglePart は 1 part で収まる小さなアップロードを検証する。この
+// 場合は最小 part サイズの制約が適用されない。
 func TestMultipartSinglePart(t *testing.T) {
 	be := newTestBackend(t, Opts{})
 
@@ -502,8 +543,8 @@ func TestMultipartSinglePart(t *testing.T) {
 	}
 }
 
-// TestMultipartReupload overwrites a part before completing, which clients do
-// when a part upload fails and is retried.
+// TestMultipartReupload は complete 前に part を上書きする。part のアップロード
+// が失敗して再試行されたときにクライアントが行う操作である。
 func TestMultipartReupload(t *testing.T) {
 	be := newTestBackend(t, Opts{})
 
@@ -524,7 +565,7 @@ func TestMultipartReupload(t *testing.T) {
 
 	uploadParts(t, be, key, mpu.UploadId, [][]byte{first, second}, []int{0, 1})
 
-	// Replace part 2 with different content of a different length.
+	// part 2 を別の内容・別の長さで置き換える。
 	replacement := randBytes(8192)
 	parts := uploadParts(t, be, key, mpu.UploadId, [][]byte{first, replacement}, []int{1})
 
@@ -543,8 +584,9 @@ func TestMultipartReupload(t *testing.T) {
 	}
 }
 
-// TestListPartsReportsSizes checks that the sparse markers give listings the
-// same view the posix backend would produce from real part files.
+// TestListPartsReportsSizes は、スパースなマーカーによる列挙結果が posix
+// バックエンドが実体の part ファイルから返すものと同じ見え方になることを確認
+// する。
 func TestListPartsReportsSizes(t *testing.T) {
 	be := newTestBackend(t, Opts{})
 
@@ -590,8 +632,8 @@ func TestListPartsReportsSizes(t *testing.T) {
 	}
 }
 
-// TestAbortRemovesStaging makes sure an aborted upload frees the blocks the
-// staging file was holding.
+// TestAbortRemovesStaging は中断されたアップロードがステージングファイルの
+// 保持していたブロックを解放することを確認する。
 func TestAbortRemovesStaging(t *testing.T) {
 	be := newTestBackend(t, Opts{})
 
@@ -628,8 +670,8 @@ func TestAbortRemovesStaging(t *testing.T) {
 	}
 }
 
-// TestCompleteIsIdempotent covers a client retrying a complete request whose
-// response it never saw.
+// TestCompleteIsIdempotent はレスポンスを受け取れなかった complete 要求を
+// クライアントが再試行する場合を検証する。
 func TestCompleteIsIdempotent(t *testing.T) {
 	be := newTestBackend(t, Opts{})
 
@@ -673,8 +715,8 @@ func TestCompleteIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestCompleteRejectsUnknownUpload checks the error for an upload that never
-// existed.
+// TestCompleteRejectsUnknownUpload は存在しないアップロードに対するエラーを
+// 確認する。
 func TestCompleteRejectsUnknownUpload(t *testing.T) {
 	be := newTestBackend(t, Opts{})
 
@@ -697,8 +739,8 @@ func TestCompleteRejectsUnknownUpload(t *testing.T) {
 	}
 }
 
-// TestPartTooSmall enforces the S3 rule that only the last part may be under
-// the minimum size.
+// TestPartTooSmall は最小サイズを下回ってよいのは最終 part だけ、という S3 の
+// 規則が守られることを確認する。
 func TestPartTooSmall(t *testing.T) {
 	be := newTestBackend(t, Opts{})
 
@@ -728,8 +770,8 @@ func TestPartTooSmall(t *testing.T) {
 	}
 }
 
-// TestDisableDirectMultipart makes sure the escape hatch really hands the work
-// back to the posix implementation.
+// TestDisableDirectMultipart は退避用オプションが実際に処理を posix の実装へ
+// 戻すことを確認する。
 func TestDisableDirectMultipart(t *testing.T) {
 	be := newTestBackend(t, Opts{DisableDirectMultipart: true})
 
@@ -745,7 +787,7 @@ func TestDisableDirectMultipart(t *testing.T) {
 		t.Fatalf("CreateMultipartUpload: %v", err)
 	}
 
-	// No staging file is created when the direct path is off.
+	// 直書き経路が無効なときはステージングファイルが作られない。
 	updir := filepath.Join(bucket, uploadDir(key, mpu.UploadId))
 	if _, err := os.Stat(stagingPath(updir)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("staging file created with direct multipart disabled: %v", err)
@@ -873,7 +915,7 @@ func TestSlotSizeRecord(t *testing.T) {
 		t.Errorf("readSlotSize = %d, want 4096", got)
 	}
 
-	// The record is written once when the upload is created.
+	// この記録はアップロード作成時に一度だけ書かれる。
 	if err := writeSlotSize(dir, 8192); err == nil {
 		t.Error("writeSlotSize over an existing record should fail")
 	}
@@ -889,7 +931,7 @@ func TestNewRequiresPartSize(t *testing.T) {
 		t.Error("direct multipart without a part size should be rejected")
 	}
 
-	// The copying path has no fixed layout, so it does not need one.
+	// コピー経路は固定レイアウトを持たないので part サイズを必要としない。
 	if _, err := New(t.TempDir(), meta.NoMeta{}, Opts{
 		Posix:                  posix.PosixOpts{NewDirPerm: 0755},
 		DisableDirectMultipart: true,

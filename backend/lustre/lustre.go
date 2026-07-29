@@ -12,22 +12,20 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package lustre provides a storage backend for parallel filesystems that
-// cannot share blocks between files.
+// Package lustre はファイル間でブロックを共有できない並列ファイルシステム向けの
+// ストレージバックエンドを提供する。
 //
-// The posix backend assembles a multipart upload by writing every part to its
-// own temporary file and then copying those files into the finished object.
-// On a filesystem with reflink support that copy is a block reference update
-// and costs nothing, which is what makes the design reasonable. Lustre stripes
-// a file across object storage targets on separate servers, so there is no
-// local block sharing for copy_file_range to exploit and every byte of a
-// multipart upload is written to disk twice.
+// posix バックエンドはマルチパートアップロードを、各 part を専用の一時ファイルへ
+// 書いてから最終オブジェクトへコピーして組み立てる。reflink 対応のファイルシステム
+// ならこのコピーはブロック参照の更新で済みコストが無いため、この設計は妥当である。
+// 一方 Lustre はファイルを別サーバ上の OST へストライプするため copy_file_range が
+// 利用できるローカルなブロック共有が存在せず、マルチパートアップロードの全バイトが
+// ディスクへ 2 回書かれる。
 //
-// This backend removes the second write. An upload gets one sparse staging
-// file and each part is written directly into the region it will occupy in the
-// finished object, so completing the upload is a truncate and a rename rather
-// than a copy. Everything outside the multipart path is inherited from the
-// posix backend unchanged.
+// このバックエンドは 2 回目の書き込みを無くす。アップロードごとに 1 本のスパースな
+// ステージングファイルを用意し、各 part を最終オブジェクト内で占める領域へ直接
+// 書き込むため、完了処理はコピーではなく truncate と rename で済む。マルチパート
+// 以外はすべて posix バックエンドからそのまま継承している。
 package lustre
 
 import (
@@ -42,47 +40,46 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-// Lustre is a posix backend with a multipart implementation that does not
-// copy part data on completion.
+// Lustre は完了時に part のデータをコピーしないマルチパート実装を持つ posix
+// バックエンドである。
 type Lustre struct {
 	*posix.Posix
 
-	// metastore is the same storer handed to the embedded posix backend.
-	// The posix fields are unexported, so the multipart implementation here
-	// needs its own reference to read and write attributes.
+	// metastore は埋め込んだ posix バックエンドに渡したものと同じストアである。
+	// posix のフィールドは非公開なので、ここのマルチパート実装が属性を読み書き
+	// するには自前の参照が要る。
 	metastore meta.MetadataStorer
 
 	rootdir string
 
-	// partSize pins the slot stride used to place parts in the staging
-	// file. When zero, the stride is taken from the first part of each
-	// upload to arrive.
+	// partSize はステージングファイル内で part を配置する間隔である。この
+	// サイズに従わない part は拒否されるため、直書きモードでは必須となる。
 	partSize int64
 
-	// directMultipart enables writing parts straight into the staging file.
-	// With it off the backend behaves exactly like posix, which is useful
-	// for isolating a problem to this code.
+	// directMultipart は part をステージングファイルへ直接書く動作を有効にする。
+	// 無効にすると posix と完全に同じ挙動になるので、問題がこのコードに起因する
+	// のかを切り分けるのに使える。
 	directMultipart bool
 
-	// The posix equivalents of these are unexported, so the multipart
-	// implementation here keeps its own copies.
+	// posix 側の同等のフィールドは非公開なので、ここのマルチパート実装は自前の
+	// コピーを持つ。
 	newDirPerm fs.FileMode
 	chownuid   bool
 	chowngid   bool
 	euid       int
 	egid       int
 
-	// actionLimiter bounds concurrent filesystem work in the methods this
-	// backend implements itself. The posix limiter still covers everything
-	// inherited from it.
+	// actionLimiter はこのバックエンドが自前で実装したメソッドにおける同時
+	// ファイルシステム操作を制限する。posix から継承したメソッドは引き続き
+	// posix 側のリミッタが担当する。
 	actionLimiter *semaphore.Weighted
 }
 
-// defaultConcurrency matches the posix backend default.
+// defaultConcurrency は posix バックエンドの既定値に合わせてある。
 const defaultConcurrency = 5000
 
-// acquireActionSlot blocks until the backend is allowed to start another
-// filesystem heavy action.
+// acquireActionSlot はファイルシステム負荷の高い操作を新たに開始してよくなる
+// までブロックする。
 func (l *Lustre) acquireActionSlot(ctx context.Context) (func(), error) {
 	if err := l.actionLimiter.Acquire(ctx, 1); err != nil {
 		return func() {}, fmt.Errorf("acquire action slot: %w", err)
@@ -90,8 +87,8 @@ func (l *Lustre) acquireActionSlot(ctx context.Context) (func(), error) {
 	return func() { l.actionLimiter.Release(1) }, nil
 }
 
-// getChownIDs returns the uid and gid newly created files should belong to,
-// and whether chowning them is needed at all.
+// getChownIDs は新規作成したファイルが属するべき uid と gid、および chown が
+// そもそも必要かどうかを返す。
 func (l *Lustre) getChownIDs(acct auth.Account) (int, int, bool) {
 	uid := l.euid
 	gid := l.egid
@@ -108,25 +105,25 @@ func (l *Lustre) getChownIDs(acct auth.Account) (int, int, bool) {
 	return uid, gid, needsChown
 }
 
-// Opts are the options for the Lustre backend. The posix options are
-// forwarded as is.
+// Opts は Lustre バックエンドのオプションである。posix のオプションはそのまま
+// 引き渡される。
 type Opts struct {
 	Posix posix.PosixOpts
 
-	// MetaStore is the metadata storer, which must be the same instance
-	// given to the posix backend.
+	// MetaStore はメタデータストアである。posix バックエンドへ渡すものと同一の
+	// インスタンスでなければならない。
 	MetaStore meta.MetadataStorer
 
-	// PartSize pins the multipart slot stride in bytes. Leave it at zero to
-	// adopt the size of the first part of each upload.
+	// PartSize はマルチパートの part サイズをバイト単位で指定する。直書きモード
+	// では必須で、このサイズに従わない part は拒否される。
 	PartSize int64
 
-	// DisableDirectMultipart falls back to the posix multipart path, which
-	// copies part data into the finished object.
+	// DisableDirectMultipart は posix のマルチパート経路に戻す。この経路は part
+	// のデータを最終オブジェクトへコピーする。
 	DisableDirectMultipart bool
 }
 
-// New creates a Lustre backend rooted at rootdir.
+// New は rootdir を起点とする Lustre バックエンドを生成する。
 func New(rootdir string, metastore meta.MetadataStorer, opts Opts) (*Lustre, error) {
 	if metastore == nil {
 		return nil, fmt.Errorf("a metadata storer is required")
@@ -134,16 +131,15 @@ func New(rootdir string, metastore meta.MetadataStorer, opts Opts) (*Lustre, err
 
 	direct := !opts.DisableDirectMultipart
 
-	// Writing parts into their final position means there is no separate
-	// per part file for the posix version machinery to work from, and the
-	// helpers that create an object version are internal to that package.
+	// part を最終位置へ直接書くと posix のバージョン管理機構が参照する part 単位
+	// のファイルが残らず、またオブジェクトバージョンを作るヘルパーは posix
+	// パッケージ内部にあり外から呼べない。
 	if direct && opts.Posix.VersioningDir != "" {
 		return nil, fmt.Errorf("bucket versioning is not supported with direct multipart writes, pass --disable-direct-mpu to use the copying multipart path")
 	}
 
-	// Parts are placed by this size, and a part that arrives with a
-	// different one is rejected rather than quietly assembled by copy, so
-	// there is no sensible default to fall back on.
+	// part の配置はこのサイズで決まり、異なるサイズの part は黙ってコピー結合に
+	// 退避させず拒否する。よって既定値として妥当な値は存在しない。
 	if direct && opts.PartSize <= 0 {
 		return nil, fmt.Errorf("a multipart part size is required, pass --mpu-part-size with the part size the clients use")
 	}
@@ -180,8 +176,8 @@ func (*Lustre) String() string {
 	return "Lustre Gateway"
 }
 
-// Shutdown releases the backend resources, including the metadata storer when
-// it holds any.
+// Shutdown はバックエンドが保持する資源を解放する。メタデータストアが解放を
+// 要するものであればそれも含む。
 func (l *Lustre) Shutdown() {
 	l.Posix.Shutdown()
 

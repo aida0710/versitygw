@@ -39,8 +39,8 @@ import (
 	"github.com/versity/versitygw/s3response"
 )
 
-// CreateMultipartUpload prepares an upload the same way the posix backend
-// does and adds the staging file the parts will be written into.
+// CreateMultipartUpload は posix バックエンドと同じ手順でアップロードを準備し、
+// さらに part の書き込み先となるステージングファイルを作る。
 func (l *Lustre) CreateMultipartUpload(ctx context.Context, mpu s3response.CreateMultipartUploadInput) (s3response.InitiateMultipartUploadResult, error) {
 	res, err := l.Posix.CreateMultipartUpload(ctx, mpu)
 	if err != nil || !l.directMultipart {
@@ -49,7 +49,7 @@ func (l *Lustre) CreateMultipartUpload(ctx context.Context, mpu s3response.Creat
 
 	updir := filepath.Join(*mpu.Bucket, uploadDir(*mpu.Key, res.UploadId))
 	if err := l.initStaging(updir); err != nil {
-		// Do not leave an upload behind that parts cannot be written to.
+		// part を書き込めないアップロードを残さない。
 		_ = l.Posix.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
 			Bucket:   mpu.Bucket,
 			Key:      mpu.Key,
@@ -61,8 +61,8 @@ func (l *Lustre) CreateMultipartUpload(ctx context.Context, mpu s3response.Creat
 	return res, nil
 }
 
-// initStaging creates the sparse file that holds every part payload and
-// records the part size the upload is laid out for.
+// initStaging は全 part のペイロードを保持するスパースファイルを作り、この
+// アップロードがどの part サイズでレイアウトされるかを記録する。
 func (l *Lustre) initStaging(updir string) error {
 	f, err := os.OpenFile(stagingPath(updir), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
@@ -75,10 +75,9 @@ func (l *Lustre) initStaging(updir string) error {
 	return writeSlotSize(updir, l.partSize)
 }
 
-// uploadSlotSize returns the part size an in-flight upload was laid out for,
-// refusing to touch it when that no longer matches the configured size. Parts
-// are placed by this value, so continuing under a different one would put them
-// at the wrong offsets.
+// uploadSlotSize は進行中のアップロードがレイアウトされた part サイズを返し、
+// それが現在の設定値と一致しない場合は操作を拒否する。part の配置はこの値で
+// 決まるため、別の値のまま続行すると part が誤ったオフセットに置かれる。
 func (l *Lustre) uploadSlotSize(updir string) (int64, error) {
 	slot, err := readSlotSize(updir)
 	if err != nil {
@@ -97,8 +96,9 @@ func (l *Lustre) uploadSlotSize(updir string) (int64, error) {
 	return slot, nil
 }
 
-// partWriter streams a part body into its region of the staging file. It
-// enforces the declared content length the way the posix temporary file does.
+// partWriter は part のボディをステージングファイル内の該当領域へ流し込む。
+// posix の一時ファイルと同様に、宣言された Content-Length を超える書き込みを
+// 拒否する。
 type partWriter struct {
 	f      *os.File
 	off    int64
@@ -118,14 +118,13 @@ func (w *partWriter) Write(b []byte) (int, error) {
 
 func (w *partWriter) Close() error { return w.f.Close() }
 
-// openPartWriter places part at its offset in the staging file and returns a
-// writer for its payload.
+// openPartWriter は part をステージングファイル内の所定のオフセットへ配置し、
+// そのペイロード用の Writer を返す。
 //
-// Part N occupies the region starting at (N-1) * the configured part size, so a
-// part may not be larger than that size or it would run into its neighbour.
-// Undersized parts are accepted here because the final part of an upload is
-// legitimately short and there is no way to tell at this point which part is
-// the final one; completion is where that is settled.
+// part N は (N-1) * 設定 part サイズ から始まる領域を占めるので、設定値より
+// 大きい part は隣の領域を侵すため許可しない。逆に小さい part はここでは許可
+// する。最終 part は短くて当然であり、この時点ではどれが最終 part かを判断
+// できないためで、その判定は完了処理で行う。
 func (l *Lustre) openPartWriter(updir string, part int32, length int64) (*partWriter, error) {
 	slot, err := l.uploadSlotSize(updir)
 	if err != nil {
@@ -146,9 +145,9 @@ func (l *Lustre) openPartWriter(updir string, part int32, length int64) (*partWr
 	return &partWriter{f: f, off: slotOffset(slot, part), remain: length}, nil
 }
 
-// markPart publishes a part by creating the sparse marker that gives it a
-// size and a modification time for listings. It is the last step of a part
-// upload, so a marker only appears once the payload is on disk.
+// markPart は part を可視化する。列挙時にサイズと更新時刻を与えるスパースな
+// マーカーを作る処理で、part アップロードの最終ステップに置いてある。これに
+// より、マーカーはペイロードがディスクに載った後にのみ現れる。
 func markPart(updir string, part int32, length int64) error {
 	name := partMarker(updir, part)
 
@@ -165,8 +164,8 @@ func markPart(updir string, part int32, length int64) error {
 	return nil
 }
 
-// UploadPart writes a part directly into the region of the staging file that
-// it will occupy in the finished object.
+// UploadPart は part を、最終オブジェクト内で占めることになるステージング
+// ファイル上の領域へ直接書き込む。
 func (l *Lustre) UploadPart(ctx context.Context, input *s3.UploadPartInput) (*s3.UploadPartOutput, error) {
 	if !l.directMultipart {
 		return l.Posix.UploadPart(ctx, input)
@@ -230,10 +229,10 @@ func (l *Lustre) UploadPart(ctx context.Context, input *s3.UploadPartInput) (*s3
 	chRdr, chunkUpload := input.Body.(middlewares.ChecksumReader)
 	isTrailingChecksum := chunkUpload && chRdr.Algorithm() != ""
 
-	// user input checksum algorithm: either with chunk uploads or with
-	// request headers
+	// クライアント指定のチェックサムアルゴリズム。chunk アップロードまたは
+	// リクエストヘッダのいずれかで渡される
 	var inputChAlgo utils.HashType
-	// user input checksum value specified with request headers
+	// リクエストヘッダで指定されたクライアント側のチェックサム値
 	var inputSum string
 
 	if !isTrailingChecksum {
@@ -266,15 +265,14 @@ func (l *Lustre) UploadPart(ctx context.Context, input *s3.UploadPartInput) (*s3
 		return nil, fmt.Errorf("retrieve mp checksum: %w", err)
 	}
 
-	// If checksum isn't provided for the part, but it has been provided on
-	// mp initialization and checksum type is 'COMPOSITE', return mismatch
-	// error
+	// part にチェックサムが無いが、マルチパート開始時には指定されており、かつ
+	// チェックサムタイプが 'COMPOSITE' の場合は不一致エラーを返す
 	if inputChAlgo == "" && checksums.Type == types.ChecksumTypeComposite {
 		return nil, s3err.GetChecksumTypeMismatchErr(checksums.Algorithm, "null")
 	}
 
-	// Check if the provided checksum algorithm matches the one specified on
-	// mp initialization
+	// 渡されたチェックサムアルゴリズムがマルチパート開始時のものと一致するか
+	// を確認する
 	if inputChAlgo != "" && checksums.Type != "" {
 		algo := types.ChecksumAlgorithm(strings.ToUpper(string(inputChAlgo)))
 		if checksums.Algorithm != algo {
@@ -283,13 +281,13 @@ func (l *Lustre) UploadPart(ctx context.Context, input *s3.UploadPartInput) (*s3
 	}
 
 	if inputChAlgo == "" {
-		// default to crc64nvme
+		// 既定は crc64nvme
 		inputChAlgo = utils.HashTypeCRC64NVME
 	}
 
-	// hashRdr calculates and validates the user input checksum
+	// hashRdr はクライアント指定のチェックサムを計算・検証する
 	var hashRdr *utils.HashReader
-	// crc64nvmeRdr calculates the part crc64nvme for internal use only
+	// crc64nvmeRdr は内部利用のみの part crc64nvme を計算する
 	var crc64nvmeRdr *utils.HashReader
 
 	if checksums.Type == "" {
@@ -336,9 +334,9 @@ func (l *Lustre) UploadPart(ctx context.Context, input *s3.UploadPartInput) (*s3
 		return nil, fmt.Errorf("write part data: %w", err)
 	}
 
-	// Publish the part before its attributes so that the attribute writes
-	// have a file to attach to when the metadata storer keeps them on the
-	// inode.
+	// 属性より先に part を可視化する。メタデータストアが属性を inode に置く
+	// 実装の場合、属性の書き込み先となるファイルが先に存在している必要がある
+	// ため。
 	if err := markPart(updir, part, length); err != nil {
 		return nil, err
 	}
@@ -350,9 +348,8 @@ func (l *Lustre) UploadPart(ctx context.Context, input *s3.UploadPartInput) (*s3
 
 	res := &s3.UploadPartOutput{ETag: &etag}
 
-	// if a checksum algorithm has been provided on mp initiation the
-	// checksums should be stored, otherwise only returned in the response
-	// without storing
+	// マルチパート開始時にチェックサムアルゴリズムが指定されていれば保存し、
+	// そうでなければ保存せずレスポンスに返すだけにする
 	if checksums.Type != "" {
 		checksum := s3response.Checksum{Algorithm: checksums.Algorithm}
 
@@ -406,14 +403,14 @@ func (l *Lustre) UploadPart(ctx context.Context, input *s3.UploadPartInput) (*s3
 	return res, nil
 }
 
-// UploadPartCopy copies a byte range of an existing object into a part.
+// UploadPartCopy は既存オブジェクトのバイト範囲を part としてコピーする。
 //
-// The copy is delegated to the posix backend, which writes the payload as a
-// standalone part file and works out the etag and checksums, and the payload is
-// then moved into its slot in the staging file so the layout stays the one this
-// backend expects. That costs an extra pass over the copied range, unlike
-// UploadPart which streams straight into the slot, because there is no request
-// body here to place in the first place. It is not the bulk ingest path.
+// コピー自体は posix バックエンドへ委譲する。posix はペイロードを独立した part
+// ファイルとして書き、etag とチェックサムを算出する。その後ペイロードを
+// ステージングファイル内の所定スロットへ移し、このバックエンドが前提とする
+// レイアウトを保つ。スロットへ直接流し込む UploadPart と違い、ここには配置
+// すべきリクエストボディがそもそも無いため、コピー範囲を 1 回余分に読み書き
+// することになる。バルク投入の経路ではないので許容している。
 func (l *Lustre) UploadPartCopy(ctx context.Context, upi *s3.UploadPartCopyInput) (s3response.CopyPartResult, error) {
 	if !l.directMultipart {
 		return l.Posix.UploadPartCopy(ctx, upi)
@@ -425,8 +422,8 @@ func (l *Lustre) UploadPartCopy(ctx context.Context, upi *s3.UploadPartCopyInput
 	updir := filepath.Join(bucket, mpPath)
 	partPath := filepath.Join(mpPath, fmt.Sprint(part))
 
-	// Report a missing upload as such before looking at the part size, which
-	// would otherwise turn every bad upload id into a layout complaint.
+	// part サイズを見る前に、存在しないアップロードはそのように報告する。順序を
+	// 逆にすると不正な uploadId がすべてレイアウトの不一致として報告される。
 	if _, err := os.Stat(updir); errors.Is(err, fs.ErrNotExist) {
 		return s3response.CopyPartResult{}, s3err.GetNoSuchUploadErr(*upi.UploadId)
 	} else if err != nil {
@@ -455,8 +452,8 @@ func (l *Lustre) UploadPartCopy(ctx context.Context, upi *s3.UploadPartCopyInput
 		return s3response.CopyPartResult{}, s3err.GetEntityTooLargeErr(fi.Size(), slot)
 	}
 
-	// Read the attributes while they still belong to the payload file, so
-	// they survive for storers that keep them on the inode.
+	// 属性がまだペイロードファイルに紐づいているうちに読み出す。属性を inode に
+	// 置くストアでも失われないようにするため。
 	saved := make(map[string][]byte)
 	for _, attr := range []string{etagkey, checksumsKey, partCrc64nvme} {
 		v, err := l.metastore.RetrieveAttribute(nil, bucket, partPath, attr)
@@ -486,8 +483,8 @@ func (l *Lustre) UploadPartCopy(ctx context.Context, upi *s3.UploadPartCopyInput
 	return res, nil
 }
 
-// relocateIntoSlot moves a standalone part payload into its region of the
-// staging file and removes the standalone copy.
+// relocateIntoSlot は独立した part ペイロードをステージングファイル内の該当
+// 領域へ移し、独立していた方を削除する。
 func relocateIntoSlot(updir string, part int32, size, off int64) error {
 	src, err := os.Open(partMarker(updir, part))
 	if err != nil {
@@ -512,22 +509,21 @@ func relocateIntoSlot(updir string, part int32, size, off int64) error {
 	return nil
 }
 
-// completedPart is a part of a completing upload, resolved against what is
-// actually on disk.
+// completedPart は完了処理中のアップロードに含まれる part を、実際のディスク上
+// の状態と突き合わせて解決したものである。
 type completedPart struct {
 	number int32
 	size   int64
-	// wantOffset is where the part must sit in the finished object.
+	// wantOffset は最終オブジェクト内でこの part が位置すべきオフセット。
 	wantOffset int64
-	// slotOffset is where its payload sits in the staging file.
+	// slotOffset はステージングファイル内でペイロードが実際にある位置。
 	slotOffset int64
 }
 
-// CompleteMultipartUpload assembles the finished object. When every part
-// landed on the offset it needs to occupy, which is the case whenever the
-// uploader used one part size, the staging file already is the object and
-// completion is a truncate and a rename. Otherwise the parts are copied into
-// a new file, matching what the posix backend always does.
+// CompleteMultipartUpload は最終オブジェクトを組み立てる。全 part が占めるべき
+// オフセットに収まっていればステージングファイルがそのままオブジェクトなので、
+// 完了処理は truncate と rename だけで済む。収まっていない場合はレイアウトが
+// 成立しないため、コピーへ退避させずエラーを返す。
 func (l *Lustre) CompleteMultipartUpload(ctx context.Context, input *s3.CompleteMultipartUploadInput) (s3response.CompleteMultipartUploadResult, string, error) {
 	if !l.directMultipart {
 		return l.Posix.CompleteMultipartUpload(ctx, input)
@@ -567,8 +563,8 @@ func (l *Lustre) CompleteMultipartUpload(ctx context.Context, input *s3.Complete
 		return res, "", fmt.Errorf("stat bucket: %w", err)
 	}
 
-	// Returned as is: a malformed part list surfaces as the matching S3
-	// error, and wrapping it would turn a 400 into a 500.
+	// そのまま返す。不正な part リストは対応する S3 エラーとして表面化するので、
+	// ラップすると 400 が 500 になってしまう。
 	s3MD5, err := backend.GetMultipartMD5(parts)
 	if err != nil {
 		return res, "", err
@@ -579,8 +575,8 @@ func (l *Lustre) CompleteMultipartUpload(ctx context.Context, input *s3.Complete
 	activeName := fmt.Sprintf("%s.%s%s", uploadID, strings.Trim(s3MD5, "\""), inProgressSuffix)
 	activeRel := filepath.Join(objRelDir, activeName)
 
-	// Renaming the upload directory is what serialises concurrent completes
-	// of the same upload: only one of them can win the rename.
+	// 同一アップロードに対する並行 complete を直列化しているのがこのディレクトリ
+	// rename である。rename に成功するのは 1 つだけになる。
 	err = os.Rename(filepath.Join(bucket, uploadRel), filepath.Join(bucket, activeRel))
 	if errors.Is(err, fs.ErrNotExist) {
 		return l.completeIdempotent(bucket, object, uploadID, activeRel, s3MD5)
@@ -594,9 +590,9 @@ func (l *Lustre) CompleteMultipartUpload(ctx context.Context, input *s3.Complete
 		return res, "", fmt.Errorf("rename upload metadata: %w", err)
 	}
 
-	// Put the upload back if anything below fails, so the client can retry.
-	// Both are best effort and become no-ops once the upload is cleaned up
-	// on the success path.
+	// 以降で失敗した場合はアップロードを元に戻し、クライアントが再試行できる
+	// ようにする。いずれも best effort で、成功パスでアップロードが片付いた後は
+	// 何もしない。
 	completed := false
 	defer func() {
 		if completed {
@@ -623,7 +619,7 @@ func (l *Lustre) CompleteMultipartUpload(ctx context.Context, input *s3.Complete
 		return res, "", fmt.Errorf("get mp checksums: %w", err)
 	}
 
-	// ChecksumType should be the same as specified on CreateMultipartUpload
+	// ChecksumType は CreateMultipartUpload で指定されたものと一致する必要がある
 	if input.ChecksumType != "" && checksums.Type != input.ChecksumType {
 		checksumType := checksums.Type
 		if checksumType == "" {
@@ -632,10 +628,10 @@ func (l *Lustre) CompleteMultipartUpload(ctx context.Context, input *s3.Complete
 		return res, "", s3err.GetChecksumTypeMismatchOnMpErr(checksumType)
 	}
 
-	// mpChecksumType holds the multipart upload checksum type
+	// mpChecksumType はマルチパートアップロードのチェックサムタイプを保持する
 	mpChecksumType := checksums.Type
 
-	// The checksum type/algorithm defaults to FULL_OBJECT(crc64nvme)
+	// チェックサムのタイプ/アルゴリズムの既定値は FULL_OBJECT(crc64nvme)
 	if checksums.Type == "" {
 		checksums.Type = types.ChecksumTypeFullObject
 		checksums.Algorithm = types.ChecksumAlgorithmCrc64nvme
@@ -666,7 +662,7 @@ func (l *Lustre) CompleteMultipartUpload(ctx context.Context, input *s3.Complete
 		return res, "", s3err.GetIncorrectMpObjectSizeErr(totalsize, *input.MpuObjectSize)
 	}
 
-	// Compute the final checksum value.
+	// 最終的なチェックサム値を算出する。
 	var value string
 	switch checksums.Type {
 	case types.ChecksumTypeComposite:
@@ -677,7 +673,7 @@ func (l *Lustre) CompleteMultipartUpload(ctx context.Context, input *s3.Complete
 
 	gotSum := completionChecksum(input, &checksums, &res, value)
 
-	// Check if the provided checksum and the calculated one are the same.
+	// クライアントが提示したチェックサムと算出値が一致するか確認する。
 	if mpChecksumType != "" && gotSum != nil {
 		s := *gotSum
 		if checksums.Type == types.ChecksumTypeComposite && !strings.Contains(s, "-") {
@@ -700,8 +696,8 @@ func (l *Lustre) CompleteMultipartUpload(ctx context.Context, input *s3.Complete
 
 	completed = true
 
-	// Drop what is left of the upload. The staging file has either been
-	// renamed away or was copied from, so only bookkeeping remains.
+	// アップロードの残骸を片付ける。ステージングファイルは rename で移動済み
+	// なので、残っているのは管理用のファイルだけである。
 	_ = os.RemoveAll(filepath.Join(bucket, activeRel))
 	_ = os.Remove(filepath.Join(bucket, objRelDir))
 	_ = l.metastore.DeleteAttributes(bucket, activeRel)
@@ -716,32 +712,32 @@ func (l *Lustre) CompleteMultipartUpload(ctx context.Context, input *s3.Complete
 	return res, "", nil
 }
 
-// completeIdempotent decides what a complete request means when it lost the
-// race for the upload directory, either to a concurrent request or to an
-// earlier attempt by the same client that it never saw the response to.
+// completeIdempotent はアップロードディレクトリの獲得競争に敗れた complete
+// 要求をどう扱うかを決める。並行する別要求に負けた場合と、同じクライアントが
+// レスポンスを受け取れなかった以前の試行に負けた場合がある。
 func (l *Lustre) completeIdempotent(bucket, object, uploadID, activeRel, s3MD5 string) (s3response.CompleteMultipartUploadResult, string, error) {
 	var none s3response.CompleteMultipartUploadResult
 
-	// Every request completing this upload computes the same etag, so
-	// reporting success without having done the work is still truthful.
+	// このアップロードを完了させる要求はいずれも同じ etag を算出するので、実際
+	// の作業をしていなくても成功を返して差し支えない。
 	success := s3response.CompleteMultipartUploadResult{
 		Bucket: &bucket,
 		Key:    &object,
 		ETag:   &s3MD5,
 	}
 
-	// Another request claimed the upload and is still assembling it.
+	// 別の要求がアップロードを獲得し、まだ組み立て中である。
 	if _, err := os.Stat(filepath.Join(bucket, activeRel)); err == nil {
 		return success, "", nil
 	}
 
-	// The upload is gone because a concurrent request already finished it.
+	// 並行する要求が既に完了させたため、アップロードは存在しない。
 	if _, err := os.Stat(filepath.Join(bucket, object)); err == nil {
 		return success, "", nil
 	}
 
-	// That stat can lose a race with the winning request moving the object
-	// into place, so fall back to the upload id recorded on the object.
+	// 上の stat は、勝った要求がオブジェクトを配置する処理と競合して外すことが
+	// あるので、オブジェクトに記録された uploadId を見て判断し直す。
 	b, err := l.metastore.RetrieveAttribute(nil, bucket, object, mpMetaKey)
 	if err != nil {
 		return none, "", s3err.GetAPIError(s3err.ErrNoSuchUpload)
@@ -752,7 +748,7 @@ func (l *Lustre) completeIdempotent(bucket, object, uploadID, activeRel, s3MD5 s
 		return none, "", fmt.Errorf("parse object multipart metadata: %w", err)
 	}
 
-	// The object may be the result of a different upload that overwrote it.
+	// そのオブジェクトは別のアップロードが上書きした結果かもしれない。
 	if mpMeta.UploadID != uploadID {
 		return none, "", s3err.GetAPIError(s3err.ErrNoSuchUpload)
 	}
@@ -760,15 +756,15 @@ func (l *Lustre) completeIdempotent(bucket, object, uploadID, activeRel, s3MD5 s
 	return success, "", nil
 }
 
-// resolveParts validates the requested parts against what is on disk and
-// works out where each one currently lives.
+// resolveParts は要求された part をディスク上の状態と突き合わせて検証し、
+// それぞれが現在どこにあるかを求める。
 func (l *Lustre) resolveParts(bucket, activeRel, uploadID string, slot int64,
 	parts []types.CompletedPart, checksums s3response.Checksum,
 	mpChecksumType types.ChecksumType, compositeChecksumRdr *utils.CompositeChecksumReader,
 ) (resolved []completedPart, totalsize int64, partSizes []int64, composableCsum string, err error) {
 	last := len(parts) - 1
 
-	// The initial value is the lower limit of partNumber: 0
+	// 初期値は partNumber の下限である 0
 	var partNumber int32
 	for i, part := range parts {
 		if part.PartNumber == nil {
@@ -800,8 +796,8 @@ func (l *Lustre) resolveParts(bucket, activeRel, uploadID string, slot int64,
 		totalsize += fi.Size()
 		partSizes = append(partSizes, totalsize)
 
-		// all parts except the last need to be greater than or equal to
-		// the minimum allowed size (5 MiB)
+		// 最終 part を除く全 part は許容最小サイズ (5 MiB) 以上である必要が
+		// ある
 		if i < last && fi.Size() < backend.MinPartSize {
 			return nil, 0, nil, "", s3err.GetEntityTooSmallErr(fi.Size(), backend.MinPartSize)
 		}
@@ -858,12 +854,12 @@ func (l *Lustre) resolveParts(bucket, activeRel, uploadID string, slot int64,
 	return resolved, totalsize, partSizes, composableCsum, nil
 }
 
-// misplacedPart returns the first part that does not sit at the offset it
-// needs to occupy in the finished object, and whether there was one.
+// misplacedPart は最終オブジェクト内で占めるべきオフセットに収まっていない
+// 最初の part と、そのような part が存在したかどうかを返す。
 //
-// Every part except the last must be exactly the configured part size, and the
-// part numbers must run from 1 without gaps. Anything else leaves the parts in
-// the wrong places in the staging file.
+// 最終 part を除く全 part が設定 part サイズちょうどであり、かつ part 番号が
+// 1 から歯抜けなく並んでいる必要がある。それ以外の場合、part はステージング
+// ファイル上の誤った位置にあることになる。
 func misplacedPart(parts []completedPart) (completedPart, bool) {
 	for _, p := range parts {
 		if p.slotOffset != p.wantOffset {
@@ -873,9 +869,9 @@ func misplacedPart(parts []completedPart) (completedPart, bool) {
 	return completedPart{}, false
 }
 
-// assemble turns the staging file into the finished object and returns its
-// bucket relative path. The parts already sit where they belong, so this is a
-// truncate and nothing more.
+// assemble はステージングファイルを最終オブジェクトに仕立て、そのバケット相対
+// パスを返す。part は既にあるべき位置に収まっているので、処理は truncate だけ
+// である。
 func (l *Lustre) assemble(bucket, activeRel, object string, parts []completedPart, totalsize int64) (string, error) {
 	if p, bad := misplacedPart(parts); bad {
 		debuglogger.Logf("lustre: rejecting complete of %v/%v: part %v is %v bytes at offset %v but the layout needs it at %v",
@@ -897,16 +893,15 @@ func (l *Lustre) assemble(bucket, activeRel, object string, parts []completedPar
 	return staging, nil
 }
 
-// finishObject copies the upload attributes onto the assembled file, moves it
-// into the namespace and moves its metadata with it.
+// finishObject は組み立て済みファイルへアップロードの属性を写し、名前空間へ
+// 移動させ、メタデータも併せて移す。
 func (l *Lustre) finishObject(bucket, object, activeRel, assembledRel string,
 	acct auth.Account, checksums s3response.Checksum, s3MD5, uploadID string,
 	partSizes []int64,
 ) error {
-	// Attributes are written against the assembled file and moved onto the
-	// object afterwards. That keeps storers that live on the inode and
-	// storers keyed by path both correct, and it means the object never
-	// appears without them.
+	// 属性は組み立て済みファイルに対して書き、その後オブジェクトへ移す。これに
+	// より inode に属性を置くストアとパスをキーにするストアの双方で正しく動作し、
+	// かつ属性の無いオブジェクトが名前空間に現れることもない。
 	for _, attr := range []string{
 		metadataHdr, contentTypeHdr, contentEncHdr, contentDispHdr,
 		contentLangHdr, cacheCtrlHdr, expiresHdr, websiteRedirectHdr,
@@ -970,8 +965,8 @@ func (l *Lustre) finishObject(bucket, object, activeRel, assembledRel string,
 	return nil
 }
 
-// completionChecksum records the computed value on both the stored checksums
-// and the response, and returns the value the client claimed, if any.
+// completionChecksum は算出値を保存用チェックサムとレスポンスの両方へ記録し、
+// クライアントが提示していた値があればそれを返す。
 func completionChecksum(input *s3.CompleteMultipartUploadInput,
 	checksums *s3response.Checksum, res *s3response.CompleteMultipartUploadResult,
 	value string,
@@ -1024,8 +1019,8 @@ func completionChecksum(input *s3.CompleteMultipartUploadInput,
 	return gotSum
 }
 
-// drainBody consumes and discards all remaining bytes from r so that the
-// client can read the error response before the connection is shut down.
+// drainBody は r の残りバイトを読み捨てる。接続が閉じられる前にクライアントが
+// エラーレスポンスを読めるようにするため。
 func drainBody(r io.Reader) {
 	if r == nil {
 		return

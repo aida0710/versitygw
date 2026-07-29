@@ -112,14 +112,14 @@ func TestSQLiteOverwrite(t *testing.T) {
 func TestSQLiteMissing(t *testing.T) {
 	s := newTestSQLite(t)
 
-	// No database file exists at all yet.
+	// データベースファイルがまだ 1 つも存在しない状態。
 	assertNoSuchKey(t, s, "nobucket", "noobject", "etag")
 
 	if err := s.StoreAttribute(nil, "b", "o", "etag", []byte("x")); err != nil {
 		t.Fatalf("StoreAttribute: %v", err)
 	}
 
-	// Database exists, but neither the key nor the attribute do.
+	// データベースは存在するが、キーも属性も存在しない状態。
 	assertNoSuchKey(t, s, "b", "o", "missing-attr")
 	assertNoSuchKey(t, s, "b", "missing-object", "etag")
 }
@@ -136,8 +136,8 @@ func TestSQLiteDeleteAttribute(t *testing.T) {
 	}
 	assertNoSuchKey(t, s, "b", "o", "etag")
 
-	// Deleting again reports the attribute as missing, matching the xattr
-	// and sidecar storers.
+	// 再度削除すると属性が無いと報告される。xattr および sidecar のストアと
+	// 同じ挙動。
 	if err := s.DeleteAttribute("b", "o", "etag"); !errors.Is(err, ErrNoSuchKey) {
 		t.Errorf("DeleteAttribute on missing attr = %v, want ErrNoSuchKey", err)
 	}
@@ -154,11 +154,11 @@ func TestSQLiteListAttributes(t *testing.T) {
 			t.Fatalf("StoreAttribute: %v", err)
 		}
 	}
-	// A nested key must not leak into the parent's attribute list.
+	// 配下のキーが親の属性一覧へ混入してはならない。
 	if err := s.StoreAttribute(nil, "b", "o/child", "etag", []byte("x")); err != nil {
 		t.Fatalf("StoreAttribute: %v", err)
 	}
-	// Neither may a bucket level attribute.
+	// バケットレベルの属性も同様。
 	if err := s.StoreAttribute(nil, "b", "", "acl", []byte("x")); err != nil {
 		t.Fatalf("StoreAttribute: %v", err)
 	}
@@ -174,8 +174,7 @@ func TestSQLiteListAttributes(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 
-	// Listing a container with no attributes yields an empty list, not an
-	// error.
+	// 属性が無いコンテナの列挙はエラーではなく空リストになる。
 	empty, err := s.ListAttributes("nobucket", "noobject")
 	if err != nil {
 		t.Fatalf("ListAttributes on missing bucket: %v", err)
@@ -188,15 +187,15 @@ func TestSQLiteListAttributes(t *testing.T) {
 func TestSQLiteDeleteAttributesRecursive(t *testing.T) {
 	s := newTestSQLite(t)
 
-	// The posix backend stores multipart part attributes underneath the
-	// upload directory and drops the whole subtree in one call.
+	// posix バックエンドはマルチパートの part 属性をアップロードディレクトリの
+	// 下に置き、サブツリーごと 1 回の呼び出しで削除する。
 	upload := ".sgwtmp/multipart/deadbeef/upload-1"
 	for _, key := range []string{upload, upload + "/1", upload + "/2"} {
 		if err := s.StoreAttribute(nil, "b", key, "etag", []byte("x")); err != nil {
 			t.Fatalf("StoreAttribute: %v", err)
 		}
 	}
-	// A sibling upload must survive.
+	// 兄弟のアップロードは残らなければならない。
 	sibling := ".sgwtmp/multipart/deadbeef/upload-2"
 	if err := s.StoreAttribute(nil, "b", sibling+"/1", "etag", []byte("keep")); err != nil {
 		t.Fatalf("StoreAttribute: %v", err)
@@ -246,7 +245,7 @@ func TestSQLiteDeleteAttributesDropsBucket(t *testing.T) {
 		t.Errorf("unrelated bucket was affected: got %q", got)
 	}
 
-	// The bucket must be usable again after being dropped.
+	// 削除後もそのバケットは再び使用できなければならない。
 	if err := s.StoreAttribute(nil, "b", "", "acl", []byte("new")); err != nil {
 		t.Fatalf("StoreAttribute after drop: %v", err)
 	}
@@ -258,7 +257,7 @@ func TestSQLiteDeleteAttributesDropsBucket(t *testing.T) {
 func TestSQLiteDeleteAttributesMissing(t *testing.T) {
 	s := newTestSQLite(t)
 
-	// Removing attributes that were never stored is not an error.
+	// 保存されたことのない属性の削除はエラーにしない。
 	if err := s.DeleteAttributes("nobucket", "noobject"); err != nil {
 		t.Errorf("DeleteAttributes on missing object: %v", err)
 	}
@@ -302,8 +301,8 @@ func TestSQLiteRenameObject(t *testing.T) {
 	assertNoSuchKey(t, s, "b", oldObj, "checksums")
 	assertNoSuchKey(t, s, "b", oldObj+"/1", "etag")
 
-	// Renaming back restores the original layout, which is what the posix
-	// backend does when completing a multipart upload fails.
+	// 逆向きのリネームで元のレイアウトに戻る。マルチパートの完了処理が失敗した
+	// ときに posix バックエンドが行う操作である。
 	if err := s.RenameObject("b", newObj, oldObj); err != nil {
 		t.Fatalf("RenameObject back: %v", err)
 	}
@@ -315,8 +314,8 @@ func TestSQLiteRenameObject(t *testing.T) {
 func TestSQLiteRenameObjectMultibyte(t *testing.T) {
 	s := newTestSQLite(t)
 
-	// substr() and length() in SQLite count characters, so a multi-byte
-	// prefix must not be trimmed by its byte length.
+	// SQLite の substr() と length() は文字数で数えるため、マルチバイトの前方
+	// 一致部分をバイト長で切り詰めてはならない。
 	const oldObj = "日本語/ディレクトリ"
 	const newObj = "renamed"
 
@@ -341,8 +340,8 @@ func TestSQLiteRenameObjectMissing(t *testing.T) {
 	}
 }
 
-// TestSQLiteLikeWildcards checks that a key containing LIKE wildcards is not
-// treated as a pattern by the recursive delete and rename.
+// TestSQLiteLikeWildcards は LIKE のワイルドカードを含むキーが、再帰的な削除と
+// リネームにおいてパターンとして扱われないことを確認する。
 func TestSQLiteLikeWildcards(t *testing.T) {
 	s := newTestSQLite(t)
 
@@ -369,9 +368,9 @@ func TestSQLiteLikeWildcards(t *testing.T) {
 	}
 }
 
-// TestSQLitePathBucketIsolation verifies that callers addressing a container
-// by path, such as the versioning directory, land in the shared database and
-// do not create a database file per object.
+// TestSQLitePathBucketIsolation は、バージョニングディレクトリのようにパスで
+// コンテナを指す呼び出しが共有データベースへ集約され、オブジェクトごとに
+// データベースファイルを作らないことを検証する。
 func TestSQLitePathBucketIsolation(t *testing.T) {
 	s := newTestSQLite(t)
 
@@ -406,7 +405,7 @@ func TestSQLitePathBucketIsolation(t *testing.T) {
 		t.Errorf("got db files %v, want only %v", dbs, sharedDB+dbSuffix)
 	}
 
-	// Dropping one version path must not disturb the others.
+	// 1 つのバージョンパスを削除しても他に影響してはならない。
 	if err := s.DeleteAttributes(versionPaths[0], ""); err != nil {
 		t.Fatalf("DeleteAttributes: %v", err)
 	}
@@ -416,11 +415,11 @@ func TestSQLitePathBucketIsolation(t *testing.T) {
 	}
 }
 
-// TestSQLiteBucketObjectSplitIsIrrelevant pins down the property the posix
-// backend depends on: it addresses the same attribute both as a bucket plus an
-// object path and as one joined path with an empty object, and both forms must
-// reach the same row. The sidecar storer gets this for free by joining the two
-// into a directory path.
+// TestSQLiteBucketObjectSplitIsIrrelevant は posix バックエンドが依存している
+// 性質を固定する。posix は同一の属性を「バケット + オブジェクトパス」の形でも
+// 「連結した 1 本のパス + 空のオブジェクト」の形でも参照するので、どちらの形でも
+// 同じ行に到達しなければならない。sidecar のストアは両者をディレクトリパスへ
+// 連結するため、この性質を自然に満たしている。
 func TestSQLiteBucketObjectSplitIsIrrelevant(t *testing.T) {
 	s := newTestSQLite(t)
 
@@ -513,8 +512,8 @@ func TestSQLiteNewSQLiteErrors(t *testing.T) {
 	}
 }
 
-// TestSQLiteReadDoesNotCreateDB guards against read paths littering the
-// metadata directory with empty databases for buckets that do not exist.
+// TestSQLiteReadDoesNotCreateDB は、読み取り経路が存在しないバケットの空の
+// データベースをメタデータディレクトリに撒き散らさないことを保証する。
 func TestSQLiteReadDoesNotCreateDB(t *testing.T) {
 	s := newTestSQLite(t)
 

@@ -28,8 +28,8 @@ var (
 	metadb string
 )
 
-// metaStoreFlags are the flags selecting where object and bucket attributes
-// are kept. They are shared by the backends built on the posix storage layer.
+// metaStoreFlags はオブジェクトとバケットの属性の保存先を選ぶフラグ群である。
+// posix ストレージ層の上に構築されたバックエンドで共有する。
 func metaStoreFlags() []cli.Flag {
 	return []cli.Flag{
 		&cli.StringFlag{
@@ -53,18 +53,18 @@ func metaStoreFlags() []cli.Flag {
 	}
 }
 
-// metaStore is the resolved metadata configuration for a backend.
+// metaStore はバックエンドに対して解決済みのメタデータ設定である。
 type metaStore struct {
 	storer meta.MetadataStorer
 
-	// sidecarDir is passed to the posix options so that the backend can
-	// report and validate it. It is empty for every other mode.
+	// sidecarDir は posix のオプションへ渡し、バックエンド側で検証・表示させる。
+	// sidecar 以外のモードでは空になる。
 	sidecarDir string
 }
 
-// newMetaStore builds the metadata storer selected on the command line. The
-// gateway root is needed because a metadata directory placed inside it would
-// be served as a bucket.
+// newMetaStore はコマンドラインで選択されたメタデータストアを構築する。
+// ゲートウェイルートを受け取るのは、その配下にメタデータディレクトリを置くと
+// バケットとして公開されてしまうためである。
 func newMetaStore(gwroot string) (metaStore, error) {
 	var selected []string
 	if sidecar != "" {
@@ -110,8 +110,8 @@ func newMetaStore(gwroot string) (metaStore, error) {
 	}
 }
 
-// checkOutsideRoot rejects a metadata directory that lives under the gateway
-// root, where it would be exposed as a bucket.
+// checkOutsideRoot はゲートウェイルート配下にあるメタデータディレクトリを
+// 拒否する。そこに置くとバケットとして公開されてしまう。
 func checkOutsideRoot(gwroot, dir string) error {
 	rootAbs, err := filepath.Abs(gwroot)
 	if err != nil {
