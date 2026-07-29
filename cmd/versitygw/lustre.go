@@ -103,7 +103,7 @@ filesystem from the object data.`,
 			},
 			&cli.Int64Flag{
 				Name:        "mpu-part-size",
-				Usage:       "expected multipart part size in bytes, used to place parts in the staging file. Defaults to the size of the first part of each upload to arrive",
+				Usage:       "multipart part size in bytes the clients use. Required unless --disable-direct-mpu is set. Parts of any other size are rejected",
 				EnvVars:     []string{"VGW_MPU_PART_SIZE"},
 				Destination: &mpuPartSize,
 			},
@@ -144,6 +144,9 @@ func runLustre(ctx *cli.Context) error {
 		return fmt.Errorf("concurrency must be positive, got %d", actionsConcurrency)
 	}
 
+	if !disableDirectMpu && mpuPartSize <= 0 {
+		return fmt.Errorf("--mpu-part-size is required: set it to the part size the clients upload with, or pass --disable-direct-mpu to use the copying multipart path")
+	}
 	if mpuPartSize < 0 {
 		return fmt.Errorf("mpu part size must not be negative, got %d", mpuPartSize)
 	}

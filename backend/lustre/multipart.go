@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,8 +61,8 @@ func (l *Lustre) CreateMultipartUpload(ctx context.Context, mpu s3response.Creat
 	return res, nil
 }
 
-// initStaging creates the sparse file that holds every part payload, and
-// pins the slot stride when one was configured.
+// initStaging creates the sparse file that holds every part payload and
+// records the part size the upload is laid out for.
 func (l *Lustre) initStaging(updir string) error {
 	f, err := os.OpenFile(stagingPath(updir), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
@@ -71,23 +72,37 @@ func (l *Lustre) initStaging(updir string) error {
 		return fmt.Errorf("create staging file: %w", err)
 	}
 
-	if l.partSize > 0 {
-		if _, err := claimSlotSize(updir, l.partSize); err != nil {
-			return err
+	return writeSlotSize(updir, l.partSize)
+}
+
+// uploadSlotSize returns the part size an in-flight upload was laid out for,
+// refusing to touch it when that no longer matches the configured size. Parts
+// are placed by this value, so continuing under a different one would put them
+// at the wrong offsets.
+func (l *Lustre) uploadSlotSize(updir string) (int64, error) {
+	slot, err := readSlotSize(updir)
+	if err != nil {
+		return 0, err
+	}
+
+	if slot != l.partSize {
+		return 0, s3err.APIError{
+			Code: "InvalidRequest",
+			Description: fmt.Sprintf("This upload was created for a part size of %d bytes, but the gateway is configured for %d. Abort the upload and start it again.",
+				slot, l.partSize),
+			HTTPStatusCode: http.StatusBadRequest,
 		}
 	}
 
-	return nil
+	return slot, nil
 }
 
-// partWriter streams a part body into its region of the staging file, or into
-// a spill file when the part does not fit its slot. It enforces the declared
-// content length the way the posix temporary file does.
+// partWriter streams a part body into its region of the staging file. It
+// enforces the declared content length the way the posix temporary file does.
 type partWriter struct {
-	f       *os.File
-	off     int64
-	remain  int64
-	spilled bool
+	f      *os.File
+	off    int64
+	remain int64
 }
 
 func (w *partWriter) Write(b []byte) (int, error) {
@@ -103,45 +118,24 @@ func (w *partWriter) Write(b []byte) (int, error) {
 
 func (w *partWriter) Close() error { return w.f.Close() }
 
-// openPartWriter places part in the staging file and returns a writer for its
-// payload.
+// openPartWriter places part at its offset in the staging file and returns a
+// writer for its payload.
 //
-// The slot stride is whatever the first part of the upload to arrive declared,
-// unless it was pinned up front. Every uploader in practice sends parts of one
-// fixed size with a possibly shorter final part, so parts land exactly where
-// they belong in the finished object and completing the upload copies nothing.
-// A part that does not fit its slot is written to its own file instead, and
-// completion falls back to assembling by copy, which is what the posix backend
-// does for every upload.
+// Part N occupies the region starting at (N-1) * the configured part size, so a
+// part may not be larger than that size or it would run into its neighbour.
+// Undersized parts are accepted here because the final part of an upload is
+// legitimately short and there is no way to tell at this point which part is
+// the final one; completion is where that is settled.
 func (l *Lustre) openPartWriter(updir string, part int32, length int64) (*partWriter, error) {
-	slot, err := readSlotSize(updir)
+	slot, err := l.uploadSlotSize(updir)
 	if err != nil {
 		return nil, err
 	}
-	if slot == 0 && length > 0 {
-		slot, err = claimSlotSize(updir, length)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	spill := spillPath(updir, part)
 
 	if length > slot {
-		debuglogger.Logf("lustre: part %v of %v does not fit the %v byte slot, spilling",
-			part, updir, slot)
-
-		f, err := os.OpenFile(spill, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-		if err != nil {
-			return nil, fmt.Errorf("open spill file: %w", err)
-		}
-		return &partWriter{f: f, remain: length, spilled: true}, nil
-	}
-
-	// Drop a spill left behind by an earlier attempt at this part number so
-	// that completion does not pick up stale data.
-	if err := os.Remove(spill); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("remove stale spill file: %w", err)
+		debuglogger.Logf("lustre: rejecting part %v of %v: %v bytes exceeds the configured part size of %v",
+			part, updir, length, slot)
+		return nil, s3err.GetEntityTooLargeErr(length, slot)
 	}
 
 	f, err := os.OpenFile(stagingPath(updir), os.O_WRONLY, 0644)
@@ -415,18 +409,14 @@ func (l *Lustre) UploadPart(ctx context.Context, input *s3.UploadPartInput) (*s3
 // UploadPartCopy copies a byte range of an existing object into a part.
 //
 // The copy is delegated to the posix backend, which writes the payload as a
-// standalone part file and works out the etag and checksums. That file is then
-// turned into a spill so the layout stays the one this backend expects.
-// Completion assembles such an upload by copy, exactly as posix would, since
-// there is no request body to place in the staging file in the first place.
+// standalone part file and works out the etag and checksums, and the payload is
+// then moved into its slot in the staging file so the layout stays the one this
+// backend expects. That costs an extra pass over the copied range, unlike
+// UploadPart which streams straight into the slot, because there is no request
+// body here to place in the first place. It is not the bulk ingest path.
 func (l *Lustre) UploadPartCopy(ctx context.Context, upi *s3.UploadPartCopyInput) (s3response.CopyPartResult, error) {
 	if !l.directMultipart {
 		return l.Posix.UploadPartCopy(ctx, upi)
-	}
-
-	res, err := l.Posix.UploadPartCopy(ctx, upi)
-	if err != nil {
-		return res, err
 	}
 
 	bucket := *upi.Bucket
@@ -435,10 +425,34 @@ func (l *Lustre) UploadPartCopy(ctx context.Context, upi *s3.UploadPartCopyInput
 	updir := filepath.Join(bucket, mpPath)
 	partPath := filepath.Join(mpPath, fmt.Sprint(part))
 
+	// Report a missing upload as such before looking at the part size, which
+	// would otherwise turn every bad upload id into a layout complaint.
+	if _, err := os.Stat(updir); errors.Is(err, fs.ErrNotExist) {
+		return s3response.CopyPartResult{}, s3err.GetNoSuchUploadErr(*upi.UploadId)
+	} else if err != nil {
+		return s3response.CopyPartResult{}, fmt.Errorf("stat uploadid: %w", err)
+	}
+
+	slot, err := l.uploadSlotSize(updir)
+	if err != nil {
+		return s3response.CopyPartResult{}, err
+	}
+
+	res, err := l.Posix.UploadPartCopy(ctx, upi)
+	if err != nil {
+		return res, err
+	}
+
 	partFile := partMarker(updir, part)
 	fi, err := os.Stat(partFile)
 	if err != nil {
 		return res, fmt.Errorf("stat copied part: %w", err)
+	}
+
+	if fi.Size() > slot {
+		os.Remove(partFile)
+		_ = l.metastore.DeleteAttributes(bucket, partPath)
+		return s3response.CopyPartResult{}, s3err.GetEntityTooLargeErr(fi.Size(), slot)
 	}
 
 	// Read the attributes while they still belong to the payload file, so
@@ -455,8 +469,8 @@ func (l *Lustre) UploadPartCopy(ctx context.Context, upi *s3.UploadPartCopyInput
 		saved[attr] = v
 	}
 
-	if err := os.Rename(partFile, spillPath(updir, part)); err != nil {
-		return res, fmt.Errorf("stage copied part: %w", err)
+	if err := relocateIntoSlot(updir, part, fi.Size(), slotOffset(slot, part)); err != nil {
+		return res, err
 	}
 
 	if err := markPart(updir, part, fi.Size()); err != nil {
@@ -472,6 +486,32 @@ func (l *Lustre) UploadPartCopy(ctx context.Context, upi *s3.UploadPartCopyInput
 	return res, nil
 }
 
+// relocateIntoSlot moves a standalone part payload into its region of the
+// staging file and removes the standalone copy.
+func relocateIntoSlot(updir string, part int32, size, off int64) error {
+	src, err := os.Open(partMarker(updir, part))
+	if err != nil {
+		return fmt.Errorf("open copied part: %w", err)
+	}
+	defer src.Close()
+
+	dst, err := os.OpenFile(stagingPath(updir), os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open staging file: %w", err)
+	}
+	defer dst.Close()
+
+	w := &partWriter{f: dst, off: off, remain: size}
+	if _, err := io.Copy(w, io.LimitReader(src, size)); err != nil {
+		return fmt.Errorf("stage copied part: %w", err)
+	}
+	if err := dst.Close(); err != nil {
+		return fmt.Errorf("stage copied part: %w", err)
+	}
+
+	return nil
+}
+
 // completedPart is a part of a completing upload, resolved against what is
 // actually on disk.
 type completedPart struct {
@@ -479,9 +519,8 @@ type completedPart struct {
 	size   int64
 	// wantOffset is where the part must sit in the finished object.
 	wantOffset int64
-	// slotOffset is where its payload currently sits in the staging file.
+	// slotOffset is where its payload sits in the staging file.
 	slotOffset int64
-	spilled    bool
 }
 
 // CompleteMultipartUpload assembles the finished object. When every part
@@ -751,17 +790,11 @@ func (l *Lustre) resolveParts(bucket, activeRel, uploadID string, slot int64,
 				backend.GetStringFromPtr(part.ETag))
 		}
 
-		spilled := false
-		if _, err := os.Lstat(spillPath(filepath.Join(bucket, activeRel), partNumber)); err == nil {
-			spilled = true
-		}
-
 		resolved = append(resolved, completedPart{
 			number:     partNumber,
 			size:       fi.Size(),
 			wantOffset: totalsize,
 			slotOffset: slotOffset(slot, partNumber),
-			spilled:    spilled,
 		})
 
 		totalsize += fi.Size()
@@ -825,96 +858,43 @@ func (l *Lustre) resolveParts(bucket, activeRel, uploadID string, slot int64,
 	return resolved, totalsize, partSizes, composableCsum, nil
 }
 
-// isContiguous reports whether every part already sits at the offset it needs
-// to occupy in the finished object, which makes the staging file the object.
-func isContiguous(parts []completedPart) bool {
+// misplacedPart returns the first part that does not sit at the offset it
+// needs to occupy in the finished object, and whether there was one.
+//
+// Every part except the last must be exactly the configured part size, and the
+// part numbers must run from 1 without gaps. Anything else leaves the parts in
+// the wrong places in the staging file.
+func misplacedPart(parts []completedPart) (completedPart, bool) {
 	for _, p := range parts {
-		if p.spilled || p.slotOffset != p.wantOffset {
-			return false
+		if p.slotOffset != p.wantOffset {
+			return p, true
 		}
 	}
-	return true
+	return completedPart{}, false
 }
 
-// assemble produces the finished object contents and returns its bucket
-// relative path.
+// assemble turns the staging file into the finished object and returns its
+// bucket relative path. The parts already sit where they belong, so this is a
+// truncate and nothing more.
 func (l *Lustre) assemble(bucket, activeRel, object string, parts []completedPart, totalsize int64) (string, error) {
+	if p, bad := misplacedPart(parts); bad {
+		debuglogger.Logf("lustre: rejecting complete of %v/%v: part %v is %v bytes at offset %v but the layout needs it at %v",
+			bucket, object, p.number, p.size, p.slotOffset, p.wantOffset)
+
+		return "", s3err.APIError{
+			Code: "InvalidRequest",
+			Description: fmt.Sprintf("This gateway is configured for a fixed multipart part size of %d bytes. Every part except the last must be exactly that size, and the part numbers must run from 1 without gaps. Part %d is %d bytes and does not fit that layout.",
+				l.partSize, p.number, p.size),
+			HTTPStatusCode: http.StatusBadRequest,
+		}
+	}
+
 	staging := stagingPath(activeRel)
-
-	if isContiguous(parts) {
-		// The staging file already holds the object, byte for byte. Cut it
-		// back to the requested parts and it is done.
-		if err := os.Truncate(filepath.Join(bucket, staging), totalsize); err != nil {
-			return "", fmt.Errorf("truncate staging file: %w", err)
-		}
-		return staging, nil
+	if err := os.Truncate(filepath.Join(bucket, staging), totalsize); err != nil {
+		return "", fmt.Errorf("truncate staging file: %w", err)
 	}
 
-	debuglogger.Logf("lustre: parts of %v/%v are not laid out contiguously, assembling by copy",
-		bucket, object)
-
-	return l.assembleByCopy(bucket, activeRel, object, parts)
-}
-
-// assembleByCopy builds the object by copying each part out of the staging
-// file or its spill file. This is the fallback for uploads whose parts did not
-// arrive in uniform sizes.
-func (l *Lustre) assembleByCopy(bucket, activeRel, object string, parts []completedPart) (string, error) {
-	tmpdir := filepath.Join(bucket, metaTmpDir)
-	if err := backend.MkdirAll(tmpdir, 0, 0, false, l.newDirPerm); err != nil {
-		return "", fmt.Errorf("create temp dir: %w", err)
-	}
-
-	dst, err := os.CreateTemp(tmpdir, objHash(object)+".")
-	if err != nil {
-		return "", fmt.Errorf("create assembly file: %w", err)
-	}
-	defer dst.Close()
-
-	assembledRel, err := filepath.Rel(bucket, dst.Name())
-	if err != nil {
-		os.Remove(dst.Name())
-		return "", fmt.Errorf("resolve assembly file: %w", err)
-	}
-
-	staging, err := os.Open(stagingPath(filepath.Join(bucket, activeRel)))
-	if err != nil {
-		os.Remove(dst.Name())
-		return "", fmt.Errorf("open staging file: %w", err)
-	}
-	defer staging.Close()
-
-	for _, p := range parts {
-		var src io.Reader
-		if p.spilled {
-			sf, err := os.Open(spillPath(filepath.Join(bucket, activeRel), p.number))
-			if err != nil {
-				os.Remove(dst.Name())
-				return "", fmt.Errorf("open spill file: %w", err)
-			}
-			src = io.LimitReader(sf, p.size)
-			_, err = io.Copy(dst, src)
-			sf.Close()
-			if err != nil {
-				os.Remove(dst.Name())
-				return "", fmt.Errorf("copy part %v: %w", p.number, err)
-			}
-			continue
-		}
-
-		src = io.NewSectionReader(staging, p.slotOffset, p.size)
-		if _, err := io.Copy(dst, src); err != nil {
-			os.Remove(dst.Name())
-			return "", fmt.Errorf("copy part %v: %w", p.number, err)
-		}
-	}
-
-	if err := dst.Close(); err != nil {
-		os.Remove(dst.Name())
-		return "", fmt.Errorf("close assembly file: %w", err)
-	}
-
-	return assembledRel, nil
+	return staging, nil
 }
 
 // finishObject copies the upload attributes onto the assembled file, moves it

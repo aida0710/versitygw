@@ -24,6 +24,8 @@ Download [latest release](https://github.com/versity/versitygw/releases)
 
 Lustre のような並列ファイルシステム向けに `lustre` バックエンドを追加しました。アップロードごとに 1 本のスパースファイルを用意し、マルチパートの各 part を最終オブジェクト内で占める位置へ直接書き込みます。完了処理は `truncate` と `rename` だけで、データのコピーは発生しません。
 
+その代わり part サイズを `--mpu-part-size` で固定する必要があり、これに従わない要求は拒否されます（[後述](#part-サイズは固定です)）。
+
 > [!IMPORTANT]
 > **バケットのバージョニングには非対応です。** part を最終位置へ直接書くと `posix` のバージョン管理機構が参照する part 単位のファイルが残らないためです。`--versioning-dir` を指定すると起動時にエラーになります。バージョニングが必要な場合は `--disable-direct-mpu` を指定して `posix` と同じコピー方式に切り替えてください。
 
@@ -47,13 +49,29 @@ ROOT_ACCESS_KEY="testuser" ROOT_SECRET_KEY="secret" ./versitygw --port :10000 --
 | オプション | 説明 |
 |---|---|
 | `--metadb <dir>` | 属性をバケット単位の SQLite データベースに格納する。オブジェクトデータとは別のファイルシステムに置ける。`posix` バックエンドでも利用可 |
-| `--mpu-part-size <bytes>` | クライアントが送る part サイズ。未指定の場合は最初に到着した part のサイズを採用する |
+| `--mpu-part-size <bytes>` | クライアントが送る part サイズ。**必須**（`--disable-direct-mpu` 指定時を除く） |
 | `--disable-direct-mpu` | `posix` と同じコピー方式に戻す。バージョニングを使う場合に必要 |
+
+#### part サイズは固定です
+
+part N は `(N-1) × part サイズ` の位置に置かれるため、レイアウトが崩れる要求は暗黙にコピー方式へ退避させず、その場でエラーを返します。
+
+| 状況 | 応答 |
+|---|---|
+| 起動時に `--mpu-part-size` 未指定 | 起動しない |
+| 設定値より大きい part の `UploadPart` | `EntityTooLarge` (400) |
+| 最終 part 以外が設定値と異なるサイズ | `CompleteMultipartUpload` で `InvalidRequest` (400) |
+| part 番号が 1 から連番でない（歯抜けの subset で complete） | `CompleteMultipartUpload` で `InvalidRequest` (400) |
+| アップロード進行中に別の `--mpu-part-size` で再起動 | 該当アップロードへの操作を `InvalidRequest` (400) で拒否 |
+
+最終 part だけは設定値より短くて構いません。
+
+そのため、本家 S3 では通れる「part ごとにサイズがばらばら」「アップロード済み part の一部だけを指定して complete」といった使い方は通りません。versitygw 付属の統合テスト 661 件では、5 MiB 設定時に part サイズが一致しない 3 件が失敗します（設定を合わせれば通ります）。既存のクライアントをそのまま繋ぐ用途ではなく、part サイズを固定できる移行パイプライン向けの設計です。
 
 注意点:
 
 * `--metadb` は sqlite3 の C ライブラリとリンクするため、ビルドに `CGO_ENABLED=1` が必要です
-* part サイズが不揃いな場合はコピーによる結合へ自動的にフォールバックします。正しさは常に担保されますが速度は `posix` 相当に戻るため、`--mpu-part-size` の明示指定を推奨します
+* `UploadPartCopy` はリクエストボディが無く直接スロットへ流し込めないため、コピー範囲を 1 回余分に読み書きします。バルク投入の経路ではないため許容しています
 
 ### WebGUI
 Get more details about the new (optional) WebGUI management/explorer here: [https://github.com/versity/versitygw/wiki/WebGUI](https://github.com/versity/versitygw/wiki/WebGUI)

@@ -141,6 +141,12 @@ func New(rootdir string, metastore meta.MetadataStorer, opts Opts) (*Lustre, err
 		return nil, fmt.Errorf("bucket versioning is not supported with direct multipart writes, pass --disable-direct-mpu to use the copying multipart path")
 	}
 
+	// Parts are placed by this size, and a part that arrives with a
+	// different one is rejected rather than quietly assembled by copy, so
+	// there is no sensible default to fall back on.
+	if direct && opts.PartSize <= 0 {
+		return nil, fmt.Errorf("a multipart part size is required, pass --mpu-part-size with the part size the clients use")
+	}
 	if opts.PartSize < 0 {
 		return nil, fmt.Errorf("invalid part size %d", opts.PartSize)
 	}

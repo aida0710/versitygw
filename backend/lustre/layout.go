@@ -32,9 +32,8 @@ import (
 //	<bucket>/.sgwtmp/multipart/<sha256hex(key)>/           carries attr "objname"
 //	<bucket>/.sgwtmp/multipart/<sha256hex(key)>/<uploadID>/
 //	    data          the staging file, sparse, holds every part payload
-//	    slotsize      decimal slot stride, written once, O_EXCL
+//	    slotsize      the configured part size the upload was created under
 //	    <N>           empty sparse marker sized to part N, for enumeration
-//	    spill.<N>     payload of part N when it did not fit its slot
 const (
 	metaTmpDir          = ".sgwtmp"
 	metaTmpMultipartDir = metaTmpDir + "/multipart"
@@ -43,7 +42,6 @@ const (
 
 	stagingName  = "data"
 	slotSizeName = "slotsize"
-	spillPrefix  = "spill."
 )
 
 // Attribute keys, mirrored from backend/posix where they are unexported. The
@@ -91,20 +89,14 @@ func partMarker(updir string, part int32) string {
 	return filepath.Join(updir, strconv.Itoa(int(part)))
 }
 
-// spillPath is the bucket relative path of a part payload that could not be
-// placed in its slot.
-func spillPath(updir string, part int32) string {
-	return filepath.Join(updir, spillPrefix+strconv.Itoa(int(part)))
-}
-
 // stagingPath is the bucket relative path of the single file every part is
 // written into.
 func stagingPath(updir string) string {
 	return filepath.Join(updir, stagingName)
 }
 
-// readSlotSize returns the slot stride recorded for an upload, or 0 when no
-// part has established one yet.
+// readSlotSize returns the part size an upload was created under, or 0 when
+// the record is missing.
 func readSlotSize(dir string) (int64, error) {
 	b, err := os.ReadFile(filepath.Join(dir, slotSizeName))
 	if errors.Is(err, os.ErrNotExist) {
@@ -122,36 +114,28 @@ func readSlotSize(dir string) (int64, error) {
 	return n, nil
 }
 
-// claimSlotSize records size as the slot stride for an upload and returns the
-// stride actually in effect. The create is exclusive, so when several parts
-// of the same upload arrive at once exactly one of them wins and the rest
-// adopt its value. This also holds across gateway processes sharing a root.
-func claimSlotSize(dir string, size int64) (int64, error) {
+// writeSlotSize records the part size an upload is created under. Parts are
+// placed by that size, so a gateway restarted with a different one must not
+// silently keep filling an upload that was laid out for the old value.
+func writeSlotSize(dir string, size int64) error {
 	name := filepath.Join(dir, slotSizeName)
 
 	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
-	if errors.Is(err, os.ErrExist) {
-		return readSlotSize(dir)
-	}
 	if err != nil {
-		return 0, fmt.Errorf("create slot size: %w", err)
+		return fmt.Errorf("create slot size: %w", err)
 	}
 
 	_, werr := f.WriteString(strconv.FormatInt(size, 10))
 	cerr := f.Close()
-	if werr != nil {
+	if werr != nil || cerr != nil {
 		os.Remove(name)
-		return 0, fmt.Errorf("write slot size: %w", werr)
-	}
-	if cerr != nil {
-		os.Remove(name)
-		return 0, fmt.Errorf("write slot size: %w", cerr)
+		return fmt.Errorf("write slot size: %w", errors.Join(werr, cerr))
 	}
 
-	return size, nil
+	return nil
 }
 
-// slotOffset is where part n is written when it fits the stride.
+// slotOffset is where part n is written.
 func slotOffset(slot int64, part int32) int64 {
 	return int64(part-1) * slot
 }

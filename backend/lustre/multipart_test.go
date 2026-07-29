@@ -34,6 +34,7 @@ import (
 	"github.com/versity/versitygw/backend"
 	"github.com/versity/versitygw/backend/meta"
 	"github.com/versity/versitygw/backend/posix"
+	"github.com/versity/versitygw/s3err"
 	"github.com/versity/versitygw/s3response"
 )
 
@@ -61,6 +62,9 @@ func newTestBackend(t *testing.T, opts Opts) *Lustre {
 
 	if opts.Posix.NewDirPerm == 0 {
 		opts.Posix.NewDirPerm = 0755
+	}
+	if opts.PartSize == 0 && !opts.DisableDirectMultipart {
+		opts.PartSize = backend.MinPartSize
 	}
 	opts.MetaStore = ms
 
@@ -212,6 +216,23 @@ func runMultipart(t *testing.T, be *Lustre, key string, payloads [][]byte, order
 	return readObject(t, be, key), stagingIno, wantEtag
 }
 
+// assertAPIError checks that err is the S3 error the client should see, rather
+// than an internal failure that would surface as a 500.
+func assertAPIError(t *testing.T, err error, code string, status int) {
+	t.Helper()
+
+	var s3e s3err.S3Error
+	if !errors.As(err, &s3e) {
+		t.Fatalf("got %T (%v), want an s3err.S3Error", err, err)
+	}
+	if got := s3e.BaseError().Code; got != code {
+		t.Errorf("error code = %q, want %q (%v)", got, code, s3e.BaseError().Description)
+	}
+	if got := s3e.StatusCode(); got != status {
+		t.Errorf("status = %d, want %d", got, status)
+	}
+}
+
 func assertUploadCleanedUp(t *testing.T, key string) {
 	t.Helper()
 
@@ -282,55 +303,167 @@ func TestMultipartOutOfOrderIsZeroCopy(t *testing.T) {
 	}
 }
 
-// TestMultipartRaggedFallsBack covers parts that are not uniformly sized. The
-// layout cannot be reused, so the object is assembled by copy and must still
-// come out byte for byte correct.
-func TestMultipartRaggedFallsBack(t *testing.T) {
-	be := newTestBackend(t, Opts{})
+// TestMultipartRaggedRejected covers a non-final part that is shorter than the
+// configured size. Its successors are already sitting at their slot offsets, so
+// the object cannot be assembled without a copy and the request is refused
+// rather than silently taking the slow path.
+func TestMultipartRaggedRejected(t *testing.T) {
+	be := newTestBackend(t, Opts{PartSize: 2 * backend.MinPartSize})
 
+	ctx := context.Background()
+	bucket := testBucket
 	key := "ragged"
+
+	mpu, err := be.CreateMultipartUpload(ctx, s3response.CreateMultipartUploadInput{
+		Bucket: &bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload: %v", err)
+	}
+
+	// Part 1 is a legal S3 part size but not the configured one, which
+	// leaves every later part sitting past where it belongs.
 	payloads := [][]byte{
-		randBytes(backend.MinPartSize + 4096),
 		randBytes(backend.MinPartSize),
+		randBytes(2 * backend.MinPartSize),
 		randBytes(2048),
 	}
+	parts := uploadParts(t, be, key, mpu.UploadId, payloads, []int{0, 1, 2})
 
-	data, stagingIno, _ := runMultipart(t, be, key, payloads, []int{0, 1, 2})
-
-	if !bytes.Equal(data, bytes.Join(payloads, nil)) {
-		t.Fatal("object contents differ")
+	_, _, err = be.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          &bucket,
+		Key:             &key,
+		UploadId:        &mpu.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+	})
+	if err == nil {
+		t.Fatal("completing with a short non-final part should fail")
 	}
-	if got := inode(t, filepath.Join(testBucket, key)); got == stagingIno {
-		t.Error("expected a copy for ragged parts, but the staging file was reused")
-	}
-
-	assertUploadCleanedUp(t, key)
+	assertAPIError(t, err, "InvalidRequest", 400)
 }
 
-// TestMultipartSpillFallsBack pins a slot smaller than the parts, forcing
-// every part onto the spill path.
-func TestMultipartSpillFallsBack(t *testing.T) {
-	be := newTestBackend(t, Opts{PartSize: 4096})
+// TestMultipartGapRejected covers completing with a subset that leaves a hole
+// in the part numbers. Plain S3 allows it, but the surviving parts would then
+// need to move.
+func TestMultipartGapRejected(t *testing.T) {
+	be := newTestBackend(t, Opts{})
 
-	key := "spilled"
+	ctx := context.Background()
+	bucket := testBucket
+	key := "gapped"
+
+	mpu, err := be.CreateMultipartUpload(ctx, s3response.CreateMultipartUploadInput{
+		Bucket: &bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload: %v", err)
+	}
+
 	payloads := [][]byte{
 		randBytes(backend.MinPartSize),
 		randBytes(backend.MinPartSize),
-		randBytes(100),
+		randBytes(1024),
 	}
+	all := uploadParts(t, be, key, mpu.UploadId, payloads, []int{0, 1, 2})
 
-	data, _, _ := runMultipart(t, be, key, payloads, []int{0, 1, 2})
-
-	if !bytes.Equal(data, bytes.Join(payloads, nil)) {
-		t.Fatal("object contents differ")
+	// Complete with parts 2 and 3 only.
+	_, _, err = be.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          &bucket,
+		Key:             &key,
+		UploadId:        &mpu.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: all[1:]},
+	})
+	if err == nil {
+		t.Fatal("completing with a gap in the part numbers should fail")
 	}
-
-	assertUploadCleanedUp(t, key)
+	assertAPIError(t, err, "InvalidRequest", 400)
 }
 
-// TestMultipartPinnedPartSize confirms that pinning the stride up front gives
-// the zero copy path even when the first part to arrive is the short one.
-func TestMultipartPinnedPartSize(t *testing.T) {
+// TestOversizedPartRejected checks that a part larger than the configured size
+// is refused at upload time, before it can run into its neighbour's region.
+func TestOversizedPartRejected(t *testing.T) {
+	be := newTestBackend(t, Opts{PartSize: backend.MinPartSize})
+
+	ctx := context.Background()
+	bucket := testBucket
+	key := "oversized"
+
+	mpu, err := be.CreateMultipartUpload(ctx, s3response.CreateMultipartUploadInput{
+		Bucket: &bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload: %v", err)
+	}
+
+	body := randBytes(backend.MinPartSize + 1)
+	length := int64(len(body))
+	part := int32(1)
+
+	_, err = be.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:        &bucket,
+		Key:           &key,
+		UploadId:      &mpu.UploadId,
+		PartNumber:    &part,
+		ContentLength: &length,
+		Body:          bytes.NewReader(body),
+	})
+	if err == nil {
+		t.Fatal("uploading a part larger than the configured size should fail")
+	}
+	assertAPIError(t, err, "EntityTooLarge", 400)
+
+	// The rejected part must leave nothing behind.
+	updir := filepath.Join(bucket, uploadDir(key, mpu.UploadId))
+	if _, err := os.Stat(partMarker(updir, part)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("rejected part left a marker behind: %v", err)
+	}
+}
+
+// TestPartSizeChangedUnderUpload covers a gateway restarted with a different
+// part size while an upload is in flight. The parts already written are laid
+// out for the old size, so the upload must not be continued.
+func TestPartSizeChangedUnderUpload(t *testing.T) {
+	be := newTestBackend(t, Opts{PartSize: backend.MinPartSize})
+
+	ctx := context.Background()
+	bucket := testBucket
+	key := "restarted"
+
+	mpu, err := be.CreateMultipartUpload(ctx, s3response.CreateMultipartUploadInput{
+		Bucket: &bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload: %v", err)
+	}
+
+	// Stand in for a restart under a different --mpu-part-size.
+	be.partSize = backend.MinPartSize * 2
+
+	body := randBytes(1024)
+	length := int64(len(body))
+	part := int32(1)
+
+	_, err = be.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:        &bucket,
+		Key:           &key,
+		UploadId:      &mpu.UploadId,
+		PartNumber:    &part,
+		ContentLength: &length,
+		Body:          bytes.NewReader(body),
+	})
+	if err == nil {
+		t.Fatal("uploading into an upload laid out for another part size should fail")
+	}
+	assertAPIError(t, err, "InvalidRequest", 400)
+}
+
+// TestMultipartShortPartFirst confirms the configured size holds regardless of
+// arrival order, including when the short final part lands first.
+func TestMultipartShortPartFirst(t *testing.T) {
 	be := newTestBackend(t, Opts{PartSize: backend.MinPartSize})
 
 	key := "pinned"
@@ -340,8 +473,7 @@ func TestMultipartPinnedPartSize(t *testing.T) {
 		randBytes(512),
 	}
 
-	// The last, short part arrives first. Without a pinned stride it would
-	// have set the slot size to 512 and pushed the rest onto spill files.
+	// The last, short part arrives first.
 	data, stagingIno, _ := runMultipart(t, be, key, payloads, []int{2, 1, 0})
 
 	if !bytes.Equal(data, bytes.Join(payloads, nil)) {
@@ -657,11 +789,11 @@ func TestNewRequiresMetaStore(t *testing.T) {
 	}
 }
 
-func TestIsContiguous(t *testing.T) {
+func TestMisplacedPart(t *testing.T) {
 	tests := []struct {
 		name  string
 		parts []completedPart
-		want  bool
+		want  int32
 	}{
 		{
 			name: "uniform slots",
@@ -670,7 +802,7 @@ func TestIsContiguous(t *testing.T) {
 				{number: 2, size: 100, wantOffset: 100, slotOffset: 100},
 				{number: 3, size: 20, wantOffset: 200, slotOffset: 200},
 			},
-			want: true,
+			want: 0,
 		},
 		{
 			name: "short middle part",
@@ -679,7 +811,7 @@ func TestIsContiguous(t *testing.T) {
 				{number: 2, size: 50, wantOffset: 100, slotOffset: 100},
 				{number: 3, size: 100, wantOffset: 150, slotOffset: 200},
 			},
-			want: false,
+			want: 3,
 		},
 		{
 			name: "gap from a skipped part number",
@@ -687,52 +819,53 @@ func TestIsContiguous(t *testing.T) {
 				{number: 1, size: 100, wantOffset: 0, slotOffset: 0},
 				{number: 3, size: 100, wantOffset: 100, slotOffset: 200},
 			},
-			want: false,
+			want: 3,
 		},
 		{
-			name: "spilled part",
+			name: "does not start at part 1",
 			parts: []completedPart{
-				{number: 1, size: 100, wantOffset: 0, slotOffset: 0, spilled: true},
+				{number: 2, size: 100, wantOffset: 0, slotOffset: 100},
 			},
-			want: false,
+			want: 2,
 		},
 		{
 			name:  "no parts",
 			parts: nil,
-			want:  true,
+			want:  0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isContiguous(tt.parts); got != tt.want {
-				t.Errorf("isContiguous = %v, want %v", got, tt.want)
+			p, bad := misplacedPart(tt.parts)
+			if !bad {
+				if tt.want != 0 {
+					t.Errorf("got no misplaced part, want part %d", tt.want)
+				}
+				return
+			}
+			if tt.want == 0 {
+				t.Fatalf("got misplaced part %d, want none", p.number)
+			}
+			if p.number != tt.want {
+				t.Errorf("misplaced part = %d, want %d", p.number, tt.want)
 			}
 		})
 	}
 }
 
-func TestClaimSlotSize(t *testing.T) {
+func TestSlotSizeRecord(t *testing.T) {
 	dir := t.TempDir()
 
-	got, err := claimSlotSize(dir, 4096)
-	if err != nil {
-		t.Fatalf("claimSlotSize: %v", err)
-	}
-	if got != 4096 {
-		t.Errorf("got %d, want 4096", got)
+	if got, err := readSlotSize(dir); err != nil || got != 0 {
+		t.Errorf("readSlotSize on a fresh dir = %d, %v; want 0, nil", got, err)
 	}
 
-	// A second claim adopts the value already in effect.
-	got, err = claimSlotSize(dir, 8192)
-	if err != nil {
-		t.Fatalf("claimSlotSize: %v", err)
-	}
-	if got != 4096 {
-		t.Errorf("got %d, want the established 4096", got)
+	if err := writeSlotSize(dir, 4096); err != nil {
+		t.Fatalf("writeSlotSize: %v", err)
 	}
 
-	got, err = readSlotSize(dir)
+	got, err := readSlotSize(dir)
 	if err != nil {
 		t.Fatalf("readSlotSize: %v", err)
 	}
@@ -740,7 +873,27 @@ func TestClaimSlotSize(t *testing.T) {
 		t.Errorf("readSlotSize = %d, want 4096", got)
 	}
 
-	if got, err := readSlotSize(t.TempDir()); err != nil || got != 0 {
-		t.Errorf("readSlotSize on a fresh dir = %d, %v; want 0, nil", got, err)
+	// The record is written once when the upload is created.
+	if err := writeSlotSize(dir, 8192); err == nil {
+		t.Error("writeSlotSize over an existing record should fail")
+	}
+}
+
+func TestNewRequiresPartSize(t *testing.T) {
+	cwd, _ := os.Getwd()
+	t.Cleanup(func() { os.Chdir(cwd) })
+
+	if _, err := New(t.TempDir(), meta.NoMeta{}, Opts{
+		Posix: posix.PosixOpts{NewDirPerm: 0755},
+	}); err == nil {
+		t.Error("direct multipart without a part size should be rejected")
+	}
+
+	// The copying path has no fixed layout, so it does not need one.
+	if _, err := New(t.TempDir(), meta.NoMeta{}, Opts{
+		Posix:                  posix.PosixOpts{NewDirPerm: 0755},
+		DisableDirectMultipart: true,
+	}); err != nil {
+		t.Errorf("copying multipart without a part size: %v", err)
 	}
 }
