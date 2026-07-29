@@ -939,3 +939,194 @@ func TestNewRequiresPartSize(t *testing.T) {
 		t.Errorf("copying multipart without a part size: %v", err)
 	}
 }
+
+// slowReader は Read を chunkSize バイトずつに区切って返す io.Reader で、
+// ネットワークソケットのように呼び出し側が要求したより小さい単位でしか
+// データが届かない状況を模擬する。ReadFrom がこの場合でも正しく全バイトを
+// 書き切ることを確認するために使う。
+type slowReader struct {
+	data      []byte
+	chunkSize int
+}
+
+func (r *slowReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := r.chunkSize
+	if n > len(p) {
+		n = len(p)
+	}
+	if n > len(r.data) {
+		n = len(r.data)
+	}
+	copy(p, r.data[:n])
+	r.data = r.data[n:]
+	return n, nil
+}
+
+// TestPartWriterReadFromMatchesWrite は partWriter.ReadFrom が、Read を
+// 何度も呼んで得た小さな断片からでも、Write を直接呼んだ場合と同じバイト列を
+// 同じオフセットへ書き込むことを確認する。io.Copy は宛先が io.ReaderFrom を
+// 実装していればそちらを優先するため、この経路が実際に使われる。
+func TestPartWriterReadFromMatchesWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "staging")
+
+	payload := randBytes(3*1024*1024 + 12345) // バッファ境界をまたぐ半端なサイズ
+
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatalf("create staging file: %v", err)
+	}
+	if err := f.Truncate(int64(len(payload))); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	f.Close()
+
+	f, err = os.OpenFile(path, os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("reopen for write: %v", err)
+	}
+	w := &partWriter{f: f, off: 0, remain: int64(len(payload))}
+
+	// io.Copy は w が io.ReaderFrom を実装していれば ReadFrom を呼ぶ。
+	// slowReader で 4KiB 単位の細切れ Read を強制し、内部バッファの
+	// 境界処理を確認する。
+	src := &slowReader{data: append([]byte(nil), payload...), chunkSize: 4096}
+	n, err := io.Copy(w, src)
+	if err != nil {
+		t.Fatalf("io.Copy via ReadFrom: %v", err)
+	}
+	if n != int64(len(payload)) {
+		t.Fatalf("copied %d bytes, want %d", n, len(payload))
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back staging file: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("staging file contents differ from what was written")
+	}
+}
+
+// TestPartWriterReadFromRejectsOverflow は ReadFrom も Write と同じく、
+// 宣言された Content-Length を超えるデータを拒否することを確認する。
+func TestPartWriterReadFromRejectsOverflow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "staging")
+
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatalf("create staging file: %v", err)
+	}
+	if err := f.Truncate(1024); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	f.Close()
+
+	f, err = os.OpenFile(path, os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("reopen for write: %v", err)
+	}
+	w := &partWriter{f: f, off: 0, remain: 100}
+	defer w.Close()
+
+	src := &slowReader{data: randBytes(1024), chunkSize: 4096}
+	if _, err := io.Copy(w, src); err == nil {
+		t.Fatal("expected an error writing more than remain bytes, got nil")
+	}
+}
+
+// TestPartWriterReadFromEmpty はゼロバイトの part でも ReadFrom が
+// エラーにならないことを確認する。
+func TestPartWriterReadFromEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "staging")
+
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatalf("create staging file: %v", err)
+	}
+	f.Close()
+
+	f, err = os.OpenFile(path, os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("reopen for write: %v", err)
+	}
+	w := &partWriter{f: f, off: 0, remain: 0}
+	defer w.Close()
+
+	n, err := io.Copy(w, &slowReader{data: nil, chunkSize: 4096})
+	if err != nil {
+		t.Fatalf("io.Copy on empty reader: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("copied %d bytes, want 0", n)
+	}
+}
+
+// countingReader は Read の呼び出し回数を記録する io.Reader。ReadFrom が
+// 実際に大きな内部バッファで読んでいるか(呼び出し回数が少ないか)を検証する
+// のに使う。デフォルトの io.Copy は 32KiB 固定バッファなので、実装前は
+// この回数が大幅に多くなる。
+type countingReader struct {
+	r     io.Reader
+	reads int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	c.reads++
+	return c.r.Read(p)
+}
+
+// TestPartWriterReadFromUsesLargeBuffer は、io.Copy が partWriter へ書く際に
+// io.ReaderFrom 経由の大きなバッファを使い、デフォルトの 32KiB 固定バッファ
+// (io.copyBuffer のフォールバック)より Read 呼び出し回数が大幅に少ないことを
+// 確認する。これが少ないほど WriteAt(pwrite) の syscall 回数も少ない。
+func TestPartWriterReadFromUsesLargeBuffer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "staging")
+
+	const payloadSize = 8 * 1024 * 1024 // 8MiB
+	payload := randBytes(payloadSize)
+
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatalf("create staging file: %v", err)
+	}
+	if err := f.Truncate(payloadSize); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	f.Close()
+
+	f, err = os.OpenFile(path, os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("reopen for write: %v", err)
+	}
+	w := &partWriter{f: f, off: 0, remain: payloadSize}
+	defer w.Close()
+
+	// 呼び出し元(HTTPボディ相当)が積極的にバッファを埋めてくる想定で、
+	// bytes.Reader をそのまま数える。bytes.Reader.Read は呼び出し側の
+	// バッファをできるだけ埋めるので、内部バッファサイズがそのまま
+	// Read 呼び出しサイズに反映される。
+	cr := &countingReader{r: bytes.NewReader(payload)}
+	if _, err := io.Copy(w, cr); err != nil {
+		t.Fatalf("io.Copy: %v", err)
+	}
+
+	// デフォルトの io.Copy (32KiB) なら 8MiB / 32KiB = 256 回。
+	// ReadFrom が 1MiB バッファを使っていれば 8MiB / 1MiB = 8 回程度で済む。
+	// 実装が無ければ 256 回近くになり失敗する、有れば 32 回未満で通る
+	// しきい値にしておく。
+	const wantMaxReads = 32
+	if cr.reads > wantMaxReads {
+		t.Errorf("Read called %d times for %d bytes; want <= %d (partWriter.ReadFrom is not using a large enough buffer)",
+			cr.reads, payloadSize, wantMaxReads)
+	}
+}
