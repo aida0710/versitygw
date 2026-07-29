@@ -20,6 +20,39 @@ Download [latest release](https://github.com/versity/versitygw/releases)
 * Protocol compatibility in `posix` allows common access to files via posix or S3
 * Simplified interface for adding new storage system support
 
+### Lustre 向けバックエンド
+
+Lustre のような並列ファイルシステム向けに `lustre` バックエンドを追加しました。アップロードごとに 1 本のスパースファイルを用意し、マルチパートの各 part を最終オブジェクト内で占める位置へ直接書き込みます。完了処理は `truncate` と `rename` だけで、データのコピーは発生しません。
+
+**以下のような環境に最適です:**
+
+* **reflink 非対応のファイルシステム** — `posix` バックエンドは各 part を個別の一時ファイルに書き、完了時にそれらを最終オブジェクトへコピーして結合します。このコピーが無償で済むのは reflink 対応 FS（XFS reflink、Btrfs、ZFS、ScoutFS）だけです。Lustre はファイルを別サーバ上の OST へストライプするためブロック共有が成立せず、全バイトがディスクへ 2 回書かれます
+* **user xattr が使えないファイルシステム** — `--metadb` でオブジェクトとバケットの属性を SQLite データベースに格納するため、拡張属性に依存しません
+* **メタデータサーバの負荷が課題になる環境** — 属性ごとに個別ファイルを作る `--sidecar` と違い 1 バケット = 1 ファイルなので、名前空間への問い合わせが大幅に減ります
+* **5 GB を超える大きなオブジェクトを扱う環境** — 単発 PUT の上限を超えるためマルチパートが避けられないワークロード
+
+#### 使い方
+
+```
+mkdir /tmp/vgw /tmp/vgwmeta
+ROOT_ACCESS_KEY="testuser" ROOT_SECRET_KEY="secret" ./versitygw --port :10000 --iam-dir /tmp/vgw \
+  lustre --metadb /tmp/vgwmeta --mpu-part-size 104857600 /tmp/vgw
+```
+
+主なオプション:
+
+| オプション | 説明 |
+|---|---|
+| `--metadb <dir>` | 属性をバケット単位の SQLite データベースに格納する。オブジェクトデータとは別のファイルシステムに置ける。`posix` バックエンドでも利用可 |
+| `--mpu-part-size <bytes>` | クライアントが送る part サイズ。未指定の場合は最初に到着した part のサイズを採用する |
+| `--disable-direct-mpu` | `posix` と同じコピー方式に戻す |
+
+注意点:
+
+* `--metadb` は sqlite3 の C ライブラリとリンクするため、ビルドに `CGO_ENABLED=1` が必要です
+* 直書きモードでは `--versioning-dir` を併用できません（起動時に拒否されます）。バージョニングが必要な場合は `--disable-direct-mpu` を指定してください
+* part サイズが不揃いな場合はコピーによる結合へ自動的にフォールバックします。正しさは常に担保されますが速度は `posix` 相当に戻るため、`--mpu-part-size` の明示指定を推奨します
+
 ### WebGUI
 Get more details about the new (optional) WebGUI management/explorer here: [https://github.com/versity/versitygw/wiki/WebGUI](https://github.com/versity/versitygw/wiki/WebGUI)
 
@@ -73,9 +106,7 @@ This will enable an S3 server on the current host listening on port 10000 and ho
 mkdir /tmp/vgw /tmp/vgwmeta
 ROOT_ACCESS_KEY="testuser" ROOT_SECRET_KEY="secret" ./versitygw --port :10000 --iam-dir /tmp/vgw lustre --metadb /tmp/vgwmeta /tmp/vgw
 ```
-The `lustre` backend targets parallel filesystems that cannot share blocks between files. The posix backend writes each multipart part to its own temporary file and copies those files into the finished object, which is free on filesystems with reflink support but writes every byte twice on Lustre. This backend writes each part straight into the region it will occupy in the finished object, so completing an upload is a truncate and a rename.
-
-`--metadb` keeps object and bucket attributes in per-bucket SQLite databases rather than in extended attributes, for filesystems where user xattrs are unavailable. It works with the `posix` backend too, and the directory may be on a different filesystem from the object data. Building with this metadata storer requires `CGO_ENABLED=1`.
+オプションの詳細と、このバックエンドが適した環境については上の [Lustre 向けバックエンド](#lustre-向けバックエンド) を参照してください。
 
 To get the usage output, run the following:
 
